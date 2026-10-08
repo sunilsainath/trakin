@@ -1,19 +1,26 @@
 'use client'
 
 import * as React from 'react'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import {
   Bell,
+  Briefcase,
+  Building2,
   Check,
   ChevronDown,
+  FileSignature,
+  Home,
   LogOut,
   Menu,
+  MessageCircle,
   Moon,
   Search,
   Settings,
+  Sparkles,
   Sun,
-  Building2,
   User as UserIcon,
+  Users,
+  Wallet,
   X,
 } from 'lucide-react'
 
@@ -21,19 +28,27 @@ import { cn, initials } from '@/lib/utils'
 import { getSupabase } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
 import { useRealtimeInsert } from '@/hooks/use-realtime'
-import { Badge, Button, ProgressBar } from '@/components/ui'
-import {
-  NAV_SECTIONS,
-  NavLink,
-  badgeCountFor,
-  isNavItemActive,
-  useVisibleNavigation,
-} from '@/components/navigation'
+import { Button, ProgressBar } from '@/components/ui'
+import { NAV_SECTIONS } from '@/components/navigation'
 
+/**
+ * Global application shell.
+ *
+ * Layout (per product spec):
+ *
+ *   HEADER:  Search | Connections | Messenger | Notifications | Profile
+ *   LEFT:    Work | Business | Contracts | Payments | AI | Logout (modules)
+ *   CENTER:  page content (the feed on /network)
+ *   RIGHT:   page-owned sidebars (Add Centre, suggestions on /network)
+ *
+ * The network is personal: header and module links render for every signed-in
+ * user, company or not. Company-gated controls (switcher, creation hub) appear
+ * only when memberships exist; the API still re-checks every permission, so a
+ * visible link is a courtesy rather than the control.
+ */
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const { me, unread, refreshUnread, companies, loading } = useCompany()
-  const sections = useVisibleNavigation()
 
   // Badge nudge: realtime INSERTs refresh counts immediately; the 60s poll in
   // useCompany remains the source of truth. RLS scopes delivery to own rows.
@@ -50,13 +65,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   })
 
   const [mobileOpen, setMobileOpen] = React.useState(false)
-  const [switcherOpen, setSwitcherOpen] = React.useState(false)
   const [menuOpen, setMenuOpen] = React.useState(false)
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
 
-  // Close the mobile drawer whenever the route changes.
+  // Close menus whenever the route changes.
   React.useEffect(() => {
     setMobileOpen(false)
+    setMenuOpen(false)
   }, [pathname])
 
   // Light-first enterprise theme: the spec forbids black-heavy UI, so the OS
@@ -82,70 +97,204 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-dvh bg-background">
-      {/* Skip link target. Row layout: the rail sits left, the column right.
-        Without `flex` here the rail stacks above the content on desktop. */}
+    <div className="flex min-h-dvh flex-col bg-background">
+      {/* ------------------------------------------------------------ */}
+      {/* Global header: Search | Connections | Messenger |              */}
+      {/* Notifications | Profile                                      */}
+      {/* ------------------------------------------------------------ */}
+      <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-1 border-b border-border bg-surface/90 px-3 backdrop-blur sm:gap-2 sm:px-5">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="lg:hidden"
+          aria-label="Open navigation"
+          onClick={() => setMobileOpen(true)}
+        >
+          <Menu />
+        </Button>
+
+        <a href="/network" className="flex items-center gap-2" aria-label="MyTrakin home">
+          <span
+            aria-hidden
+            className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-2xs font-bold text-primary-foreground"
+          >
+            MT
+          </span>
+          <span className="hidden text-sm font-semibold tracking-tight sm:inline">MyTrakin</span>
+        </a>
+
+        <HeaderSearch />
+
+        <div className="flex-1" />
+
+        <HeaderLink href="/network" label="Connections" active={pathname.startsWith('/network')}>
+          <Users />
+        </HeaderLink>
+        <HeaderLink
+          href="/messages"
+          label="Messenger"
+          active={pathname.startsWith('/messages')}
+          badge={unread.messages}
+        >
+          <MessageCircle />
+        </HeaderLink>
+        <HeaderLink
+          href="/notifications"
+          label="Notifications"
+          active={pathname.startsWith('/notifications')}
+          badge={unread.notifications}
+        >
+          <Bell />
+        </HeaderLink>
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={toggleTheme}
+          aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
+        >
+          {theme === 'dark' ? <Sun /> : <Moon />}
+        </Button>
+
+        {/* Profile */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            aria-label="Profile"
+            className="flex h-9 items-center gap-2 rounded-md px-1.5 transition-colors hover:bg-muted"
+          >
+            <Avatar />
+          </button>
+
+          {menuOpen ? (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} aria-hidden />
+              <div
+                role="menu"
+                aria-label="Profile"
+                className="absolute right-0 top-11 z-20 w-60 rounded-lg border border-border bg-surface p-1 shadow-popover"
+              >
+                <div className="border-b border-border px-3 py-2.5">
+                  <p className="truncate text-sm font-medium">
+                    {me ? `${me.first_name} ${me.last_name}` : 'Account'}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">{me?.email}</p>
+                </div>
+
+                <MenuLink href="/settings/profile" icon={<UserIcon />}>
+                  Profile
+                </MenuLink>
+                <MenuLink href="/settings/security" icon={<Settings />}>
+                  Security
+                </MenuLink>
+                <MenuLink href="/settings/notifications" icon={<Bell />}>
+                  Notifications
+                </MenuLink>
+
+                <div className="my-1 h-px bg-border" />
+
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={signOut}
+                  className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-sm text-danger transition-colors hover:bg-danger-soft"
+                >
+                  <LogOut aria-hidden className="size-4" />
+                  Sign out
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
+      </header>
+
+      {/* ------------------------------------------------------------ */}
+      {/* Body row: module rail left, page content center                */}
+      {/* ------------------------------------------------------------ */}
       <div id="main" className="flex min-w-0 flex-1">
-        {/* ------------------------------------------------------------ */}
-        {/* Left rail                                                      */}
-        {/* ------------------------------------------------------------ */}
         <aside
+          aria-label="Modules"
           className={cn(
-            'fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-surface',
+            'fixed inset-y-0 left-0 top-14 z-40 flex w-64 flex-col border-r border-border bg-surface',
             'transition-transform duration-200 lg:static lg:translate-x-0',
             mobileOpen ? 'translate-x-0 shadow-popover' : '-translate-x-full',
           )}
         >
-          <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-            <a href="/dashboard" className="flex items-center gap-2">
-              <span
-                aria-hidden
-                className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-2xs font-bold text-primary-foreground"
-              >
-                MT
-              </span>
-              <span className="text-sm font-semibold tracking-tight">MyTrakin</span>
-            </a>
+          <div className="flex shrink-0 items-center justify-between border-b border-border p-3 lg:hidden">
+            <span className="px-1 text-2xs font-semibold uppercase tracking-wider text-subtle-foreground">
+              Modules
+            </span>
             <Button
               variant="ghost"
               size="icon-sm"
-              className="lg:hidden"
               aria-label="Close navigation"
               onClick={() => setMobileOpen(false)}
             >
               <X />
             </Button>
           </div>
+          {companies.length > 0 ? (
+            <div className="shrink-0 border-b border-border p-3">
+              <CompanySwitcher />
+            </div>
+          ) : null}
 
-          <nav aria-label="Main" className="flex-1 space-y-5 overflow-y-auto p-3 scrollbar-thin">
-            {sections.map((section) => (
-              <div key={section.label}>
-                <p className="px-3 pb-1.5 text-2xs font-semibold uppercase tracking-wider text-subtle-foreground">
-                  {section.label}
-                </p>
-                <div className="space-y-0.5">
-                  {section.items.map((item) => (
-                    <NavLink
-                      key={item.href}
-                      item={item}
-                      active={isNavItemActive(item, pathname)}
-                      badge={item.badge ? badgeCountFor(item, unread) : undefined}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
+          <nav aria-label="Modules" className="flex-1 space-y-0.5 overflow-y-auto p-3 scrollbar-thin">
+            {MODULES.map((item) => {
+              const active =
+                item.href === '/network'
+                  ? pathname === '/network'
+                  : pathname === item.href || pathname.startsWith(`${item.href}/`)
+              return (
+                <a
+                  key={item.href}
+                  href={item.href}
+                  aria-current={active ? 'page' : undefined}
+                  className={cn(
+                    'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                    active
+                      ? 'bg-primary-soft text-primary-strong'
+                      : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      '[&_svg]:size-4',
+                      active ? 'text-primary' : 'text-muted-foreground',
+                    )}
+                  >
+                    {item.icon}
+                  </span>
+                  {item.label}
+                </a>
+              )
+            })}
           </nav>
 
-          <div className="shrink-0 border-t border-border p-3">
-            <p className="px-3 pb-2 text-2xs text-subtle-foreground">
-              {me?.onboarding_completed ? 'Workspace ready' : 'Finish onboarding'}
-            </p>
-            <ProgressBar
-              value={me?.onboarding_completed ? 100 : 40}
-              tone={me?.onboarding_completed ? 'success' : 'primary'}
-              label="Onboarding progress"
-            />
+          <div className="shrink-0 space-y-3 border-t border-border p-3">
+            <div>
+              <p className="px-3 pb-2 text-2xs text-subtle-foreground">
+                {me?.onboarding_completed ? 'Workspace ready' : 'Finish onboarding'}
+              </p>
+              <ProgressBar
+                value={me?.onboarding_completed ? 100 : 40}
+                tone={me?.onboarding_completed ? 'success' : 'primary'}
+                label="Onboarding progress"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={signOut}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <span aria-hidden className="[&_svg]:size-4">
+                <LogOut />
+              </span>
+              Logout
+            </button>
           </div>
         </aside>
 
@@ -157,134 +306,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           />
         ) : null}
 
-        {/* ------------------------------------------------------------ */}
-        {/* Main column                                                    */}
-        {/* ------------------------------------------------------------ */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-surface/90 px-3 backdrop-blur sm:px-5">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="lg:hidden"
-              aria-label="Open navigation"
-              onClick={() => setMobileOpen(true)}
-            >
-              <Menu />
-            </Button>
-
-            {/* Company switcher */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setSwitcherOpen((v) => !v)}
-                aria-expanded={switcherOpen}
-                aria-haspopup="listbox"
-                className="flex h-9 items-center gap-2 rounded-md border border-border bg-surface px-2.5 text-sm transition-colors hover:bg-muted"
-              >
-                <Building2 aria-hidden className="size-4 text-muted-foreground" />
-                <CompanyName />
-                <ChevronDown aria-hidden className="size-3.5 text-muted-foreground" />
-              </button>
-
-              {switcherOpen ? (
-                <>
-                  <div
-                    className="fixed inset-0 z-10"
-                    onClick={() => setSwitcherOpen(false)}
-                    aria-hidden
-                  />
-                  <div
-                    role="listbox"
-                    aria-label="Switch company"
-                    className="absolute left-0 top-11 z-20 w-72 rounded-lg border border-border bg-surface p-1 shadow-popover"
-                  >
-                    <CompanySwitcher
-                      onSelect={() => setSwitcherOpen(false)}
-                    />
-                  </div>
-                </>
-              ) : null}
-            </div>
-
-            <div className="flex-1" />
-
-            <Button variant="ghost" size="icon-sm" asChild>
-              <a href="/search" aria-label="Global search">
-                <Search />
-              </a>
-            </Button>
-
-            <Button variant="ghost" size="icon-sm" asChild>
-              <a href="/notifications" aria-label="Notifications" className="relative">
-                <Bell />
-                {unread.notifications > 0 ? (
-                  <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-danger ring-2 ring-surface" />
-                ) : null}
-              </a>
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={toggleTheme}
-              aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
-            >
-              {theme === 'dark' ? <Sun /> : <Moon />}
-            </Button>
-
-            {/* User menu */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setMenuOpen((v) => !v)}
-                aria-expanded={menuOpen}
-                aria-haspopup="menu"
-                className="flex h-9 items-center gap-2 rounded-md px-1.5 transition-colors hover:bg-muted"
-              >
-                <Avatar />
-              </button>
-
-              {menuOpen ? (
-                <>
-                  <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} aria-hidden />
-                  <div
-                    role="menu"
-                    className="absolute right-0 top-11 z-20 w-60 rounded-lg border border-border bg-surface p-1 shadow-popover"
-                  >
-                    <div className="border-b border-border px-3 py-2.5">
-                      <p className="truncate text-sm font-medium">
-                        {me ? `${me.first_name} ${me.last_name}` : 'Account'}
-                      </p>
-                      <p className="truncate text-xs text-muted-foreground">{me?.email}</p>
-                    </div>
-
-                    <MenuLink href="/settings/profile" icon={<UserIcon />}>
-                      Profile
-                    </MenuLink>
-                    <MenuLink href="/settings/security" icon={<Settings />}>
-                      Security
-                    </MenuLink>
-                    <MenuLink href="/settings/notifications" icon={<Bell />}>
-                      Notifications
-                    </MenuLink>
-
-                    <div className="my-1 h-px bg-border" />
-
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={signOut}
-                      className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-sm text-danger transition-colors hover:bg-danger-soft"
-                    >
-                      <LogOut aria-hidden className="size-4" />
-                      Sign out
-                    </button>
-                  </div>
-                </>
-              ) : null}
-            </div>
-          </header>
-
           {!loading && companies.length === 0 ? (
             <div className="border-b border-border bg-primary-soft px-3 py-2 text-center text-sm sm:px-5">
               <span className="text-primary-strong">
@@ -303,74 +325,165 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   )
 }
 
-function CompanyName() {
-  const { activeCompany, loading } = useCompany()
-  if (loading) return <span className="text-muted-foreground">Loading…</span>
-  if (!activeCompany) return <span className="text-muted-foreground">No company</span>
-  return <span className="max-w-40 truncate font-medium">{activeCompany.display_name}</span>
+/** Module rail: Work | Business | Contracts | Payments | AI (+ Feed home). */
+const MODULES: { href: string; label: string; icon: React.ReactNode }[] = [
+  { href: '/network', label: 'Feed', icon: <Home aria-hidden /> },
+  { href: '/time', label: 'Work', icon: <Briefcase aria-hidden /> },
+  { href: '/companies', label: 'Business', icon: <Building2 aria-hidden /> },
+  { href: '/contracts', label: 'Contracts', icon: <FileSignature aria-hidden /> },
+  { href: '/payments', label: 'Payments', icon: <Wallet aria-hidden /> },
+  { href: '/assistant', label: 'AI', icon: <Sparkles aria-hidden /> },
+]
+
+function HeaderSearch() {
+  const router = useRouter()
+  const [term, setTerm] = React.useState('')
+
+  return (
+    <form
+      role="search"
+      aria-label="Global search"
+      className="ml-2 hidden min-w-0 flex-1 max-w-md items-center md:flex"
+      onSubmit={(event) => {
+        event.preventDefault()
+        const q = term.trim()
+        if (q.length >= 2) router.push(`/search?q=${encodeURIComponent(q)}`)
+      }}
+    >
+      <div className="relative w-full">
+        <Search
+          aria-hidden
+          className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+        />
+        <input
+          value={term}
+          onChange={(event) => setTerm(event.target.value)}
+          placeholder="Search"
+          aria-label="Search"
+          className="h-9 w-full rounded-md border border-input bg-background pl-8 pr-3 text-sm placeholder:text-muted-foreground/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        />
+      </div>
+    </form>
+  )
 }
 
-function CompanySwitcher({ onSelect }: { onSelect: () => void }) {
+function HeaderLink({
+  href,
+  label,
+  active,
+  badge,
+  children,
+}: {
+  href: string
+  label: string
+  active?: boolean
+  badge?: number
+  children: React.ReactNode
+}) {
+  return (
+    <a
+      href={href}
+      aria-label={label}
+      aria-current={active ? 'page' : undefined}
+      title={label}
+      className={cn(
+        'relative flex h-9 items-center gap-2 rounded-md px-2 text-sm font-medium transition-colors',
+        active ? 'text-primary-strong' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+      )}
+    >
+      <span aria-hidden className="[&_svg]:size-4">
+        {children}
+      </span>
+      <span className="hidden xl:inline">{label}</span>
+      {badge != null && badge > 0 ? (
+        <span className="absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-2xs font-semibold text-white">
+          {badge > 99 ? '99+' : badge}
+        </span>
+      ) : null}
+    </a>
+  )
+}
+
+function CompanySwitcher() {
   const { companies, activeCompanyPublicId, switchCompany, switching } = useCompany()
+  const [open, setOpen] = React.useState(false)
 
   if (companies.length === 0) {
     return (
-      <div className="px-3 py-6 text-center">
+      <div className="px-1 py-2 text-center">
         <p className="text-sm font-medium">No companies yet</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Create a company to start collaborating with your team.
-        </p>
+        <p className="mt-1 text-xs text-muted-foreground">Networking personally.</p>
         <Button className="mt-3 w-full" size="sm" asChild>
-          <a href="/companies/new" onClick={onSelect}>
-            Create company
-          </a>
+          <a href="/onboarding">Create company</a>
         </Button>
       </div>
     )
   }
 
+  const active = companies.find((c) => c.public_id === activeCompanyPublicId)
+
   return (
-    <>
-      {companies.map((company) => {
-        const active = company.public_id === activeCompanyPublicId
-        return (
-          <button
-            key={company.public_id}
-            type="button"
-            role="option"
-            aria-selected={active}
-            disabled={switching}
-            onClick={() => {
-              if (!active) void switchCompany(company.public_id)
-              onSelect()
-            }}
-            className="flex w-full items-start gap-2.5 rounded-md px-3 py-2 text-left transition-colors hover:bg-muted disabled:opacity-50"
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className="flex h-9 w-full items-center gap-2 rounded-md border border-border bg-surface px-2.5 text-sm transition-colors hover:bg-muted"
+      >
+        <Building2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate text-left font-medium">
+          {active?.display_name ?? 'Select company'}
+        </span>
+        <ChevronDown aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+      </button>
+
+      {open ? (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
+          <div
+            role="listbox"
+            aria-label="Switch company"
+            className="absolute left-0 right-0 top-11 z-20 rounded-lg border border-border bg-surface p-1 shadow-popover"
           >
-            <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded bg-secondary text-2xs font-semibold text-secondary-foreground">
-              {initials(company.display_name)}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium">{company.display_name}</span>
-              <span className="flex items-center gap-1.5">
-                <span className="font-mono text-2xs text-subtle-foreground">
-                  {company.public_id}
-                </span>
-                {company.verification_state !== 'VERIFIED' ? (
-                  <Badge tone="warning" className="px-1.5 py-0 text-2xs">
-                    {company.verification_state === 'UNVERIFIED' ? 'Unverified' : 'Pending'}
-                  </Badge>
-                ) : null}
-              </span>
-            </span>
-            {active ? <Check aria-hidden className="mt-1 size-4 text-primary" /> : null}
-          </button>
-        )
-      })}
-      <div className="my-1 h-px bg-border" />
-      <MenuLink href="/companies/new" icon={<Building2 />} onNavigate={onSelect}>
-        New company
-      </MenuLink>
-    </>
+            {companies.map((company) => {
+              const isActive = company.public_id === activeCompanyPublicId
+              return (
+                <button
+                  key={company.public_id}
+                  type="button"
+                  role="option"
+                  aria-selected={isActive}
+                  disabled={switching}
+                  onClick={() => {
+                    if (!isActive) void switchCompany(company.public_id)
+                    setOpen(false)
+                  }}
+                  className="flex w-full items-start gap-2.5 rounded-md px-3 py-2 text-left transition-colors hover:bg-muted disabled:opacity-50"
+                >
+                  <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded bg-secondary text-2xs font-semibold text-secondary-foreground">
+                    {initials(company.display_name)}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">
+                      {company.display_name}
+                    </span>
+                    <span className="font-mono text-2xs text-subtle-foreground">
+                      {company.public_id}
+                    </span>
+                  </span>
+                  {isActive ? <Check aria-hidden className="mt-1 size-4 text-primary" /> : null}
+                </button>
+              )
+            })}
+            <div className="my-1 h-px bg-border" />
+            <MenuLink href="/onboarding" icon={<Building2 />} onNavigate={() => setOpen(false)}>
+              New company
+            </MenuLink>
+          </div>
+        </>
+      ) : null}
+    </div>
   )
 }
 

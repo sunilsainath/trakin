@@ -6,7 +6,15 @@ import { z } from 'zod'
 import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
 import { PageHeader, PageShell } from '@/components/page'
-import { Alert, Button, Card, CardContent, CardHeader, CardTitle, EmptyState } from '@/components/ui'
+import {
+  Alert,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  EmptyState,
+} from '@/components/ui'
 import { SchemaForm, type FieldConfig } from '@/components/ui/schema-form'
 import { ErrorState, LoadingBlock } from '@/components/query'
 import { formatRelative } from '@/lib/utils'
@@ -35,7 +43,7 @@ const postSchema = z.object({
 const postFields: FieldConfig[] = [{ name: 'content', label: 'Share an update' }]
 
 export default function NetworkPage() {
-  const { me } = useCompany()
+  const { me, can } = useCompany()
   const [posts, setPosts] = React.useState<Post[] | null>(null)
   const [connections, setConnections] = React.useState<Connection[] | null>(null)
   const [error, setError] = React.useState<unknown>(null)
@@ -149,42 +157,95 @@ export default function NetworkPage() {
             )}
           </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Connections · {connections?.length ?? 0}</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex gap-2">
-                <input
-                  value={invite}
-                  onChange={(event) => setInvite(event.target.value)}
-                  placeholder="User ID (U…)"
-                  aria-label="User public id"
-                  className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm"
-                />
-                <Button size="sm" onClick={() => void connect()}>
-                  Connect
-                </Button>
-              </div>
-              <div className="space-y-2">
-                {(connections ?? []).map((connection) => (
-                  <div key={connection.public_id} className="text-sm">
-                    <p className="font-medium">
-                      {connection.display_name ?? connection.public_id}
-                    </p>
-                    {connection.headline ? (
-                      <p className="text-xs text-muted-foreground">{connection.headline}</p>
-                    ) : null}
-                  </div>
-                ))}
-                {(connections ?? []).length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No connections yet.</p>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
+          <div className="space-y-4">
+            <AddCentre can={can} />
+            <Card>
+              <CardHeader>
+                <CardTitle>Connection Suggestions · {connections?.length ?? 0}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex gap-2">
+                  <input
+                    value={invite}
+                    onChange={(event) => setInvite(event.target.value)}
+                    placeholder="User ID (U…)"
+                    aria-label="User public id"
+                    className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm"
+                  />
+                  <Button size="sm" onClick={() => void connect()}>
+                    Connect
+                  </Button>
+                </div>
+                <a
+                  href="/search"
+                  className="block text-sm text-primary hover:underline"
+                >
+                  Find people to connect with
+                </a>
+                <div className="space-y-2">
+                  {(connections ?? []).map((connection) => (
+                    <div key={connection.public_id} className="text-sm">
+                      <p className="font-medium">
+                        {connection.display_name ?? connection.public_id}
+                      </p>
+                      {connection.headline ? (
+                        <p className="text-xs text-muted-foreground">{connection.headline}</p>
+                      ) : null}
+                    </div>
+                  ))}
+                  {(connections ?? []).length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No connections yet.</p>
+                  ) : null}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         </div>
       )}
     </PageShell>
+  )
+}
+
+/**
+ * Creation hub: every entry links to a real page that performs the action.
+ * Entries render only when the caller holds the matching permission, so the
+ * card never shows a button that would be refused — and never shows one for
+ * users without a company where a company is required.
+ */
+function AddCentre({ can }: { can: (permission: string) => boolean }) {
+  const items: { href: string; label: string; permission?: string }[] = [
+    { href: '/network', label: 'Share an update' },
+    { href: '/projects', label: 'New project', permission: 'projects.create' },
+    { href: '/sows', label: 'New SOW', permission: 'sows.create' },
+    { href: '/contracts', label: 'New contract', permission: 'contracts.create' },
+    { href: '/documents', label: 'Upload document', permission: 'documents.upload' },
+    {
+      href: '/payments/accounts',
+      label: 'Connect bank',
+      permission: 'payments.connect_bank',
+    },
+  ]
+  const visible = items.filter((item) => !item.permission || can(item.permission))
+  if (visible.length === 0) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Add Centre</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-col gap-1">
+          {visible.map((item) => (
+            <a
+              key={item.href}
+              href={item.href}
+              className="rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              {item.label}
+            </a>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
