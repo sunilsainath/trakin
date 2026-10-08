@@ -196,9 +196,14 @@ async def effective_permissions(
     company_id: uuid.UUID,
     user_id: uuid.UUID | None = None,
 ) -> list[str]:
+    # app.my_permissions is SETOF text: selecting it bare and taking scalar()
+    # would keep only the first permission (the T21 trap — see deps.py).
     result = await conn.execute(
-        text("SELECT app.my_permissions(:company_id, :user_id)"),
+        text(
+            "SELECT COALESCE(array_agg(perm), '{}')"
+            " FROM app.my_permissions(:company_id, :user_id) AS perm"
+        ),
         {"company_id": company_id, "user_id": user_id},
     )
-    keys = result.scalar()
-    return sorted(keys or [])
+    keys = result.scalar() or []
+    return sorted(keys)

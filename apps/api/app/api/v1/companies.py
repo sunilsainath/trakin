@@ -72,7 +72,11 @@ async def list_companies(ctx_and_conn: UserOnlyContext) -> list[dict[str, Any]]:
                     text(
                         """
                     SELECT app.effective_role_keys(c.id, :user_id) AS role_keys,
-                           app.my_permissions(c.id, :user_id) AS permissions
+                           COALESCE(
+                             (SELECT array_agg(perm)
+                                FROM app.my_permissions(c.id, :user_id) AS perm),
+                             '{}'
+                           ) AS permissions
                       FROM public.companies c
                      WHERE c.public_id = :public_id
                     """
