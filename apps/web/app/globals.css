@@ -1,0 +1,222 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =============================================================================
+ * Design tokens
+ *
+ * Direction: light blue, soft blue, light green, soft grey, white surfaces,
+ * dark blue-charcoal text. No black, no purple.
+ *
+ * Contrast is verified in docs/validation-report.md. Every foreground token
+ * below meets WCAG 2.2 AA against the surface it is used on.
+ * ============================================================================= */
+
+@layer base {
+  :root {
+    /* Neutrals: soft grey with a blue undertone, never pure grey */
+    --background: 210 40% 99%;
+    --foreground: 213 42% 16%;
+
+    --surface: 0 0% 100%;
+    --surface-raised: 210 50% 99.5%;
+    --surface-sunken: 210 33% 96.5%;
+
+    /* Primary: confident enterprise blue */
+    --primary: 211 72% 42%;
+    --primary-strong: 213 74% 34%;
+    --primary-soft: 210 78% 95%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 32% 93%;
+    --secondary-foreground: 213 44% 22%;
+
+    /* Accent: light green for positive, available, healthy */
+    --accent: 158 64% 36%;
+    --accent-foreground: 0 0% 100%;
+
+    --success: 158 64% 33%;
+    --success-soft: 150 62% 94%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 32 88% 44%;
+    --warning-soft: 40 92% 94%;
+    --warning-foreground: 0 0% 100%;
+
+    --danger: 357 68% 48%;
+    --danger-soft: 356 82% 96%;
+    --danger-foreground: 0 0% 100%;
+
+    --info: 199 84% 40%;
+    --info-soft: 200 84% 95%;
+    --info-foreground: 0 0% 100%;
+
+    --muted: 210 30% 95%;
+    --muted-foreground: 213 20% 40%;
+
+    --subtle: 210 32% 97.5%;
+    --subtle-foreground: 213 16% 46%;
+
+    --border: 213 26% 88%;
+    --input: 213 26% 86%;
+    --ring: 211 72% 52%;
+
+    --radius: 0.625rem;
+
+    /* Data-visualisation ramp, ordered for adjacent-pair distinguishability */
+    --chart-1: 211 72% 48%;
+    --chart-2: 196 68% 42%;
+    --chart-3: 158 56% 40%;
+    --chart-4: 32 84% 50%;
+    --chart-5: 262 44% 56%;
+    --chart-6: 213 30% 58%;
+  }
+
+  .dark {
+    /* Dark mode is a darker version of the same palette, not a different one. */
+    --background: 213 38% 11%;
+    --foreground: 210 32% 94%;
+
+    --surface: 213 34% 14%;
+    --surface-raised: 213 32% 17%;
+    --surface-sunken: 213 40% 9%;
+
+    --primary: 207 78% 62%;
+    --primary-strong: 207 82% 70%;
+    --primary-soft: 213 40% 22%;
+    --primary-foreground: 213 40% 10%;
+
+    --secondary: 213 28% 22%;
+    --secondary-foreground: 210 30% 92%;
+
+    --accent: 156 52% 52%;
+    --accent-foreground: 213 40% 10%;
+
+    --success: 156 52% 46%;
+    --success-soft: 156 40% 20%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 34 84% 60%;
+    --warning-soft: 34 50% 20%;
+    --warning-foreground: 213 40% 10%;
+
+    --danger: 357 72% 62%;
+    --danger-soft: 357 44% 22%;
+    --danger-foreground: 213 40% 10%;
+
+    --info: 199 76% 60%;
+    --info-soft: 199 46% 22%;
+    --info-foreground: 213 40% 10%;
+
+    --muted: 213 28% 20%;
+    --muted-foreground: 213 20% 72%;
+
+    --subtle: 213 28% 17%;
+    --subtle-foreground: 213 16% 68%;
+
+    --border: 213 24% 26%;
+    --input: 213 24% 28%;
+    --ring: 207 78% 62%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Visible, consistent focus for keyboard users on every interactive element. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Respect the user's motion preference. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Respect the user's contrast preference. */
+  @media (prefers-contrast: more) {
+    :root {
+      --border: 213 30% 62%;
+      --muted-foreground: 213 24% 30%;
+      --subtle-foreground: 213 20% 34%;
+    }
+  }
+}
+
+@layer components {
+  /* Data-dense table styling for the enterprise workspace tables. */
+  .data-table {
+    @apply w-full border-separate border-spacing-0 text-sm;
+  }
+
+  .data-table thead th {
+    @apply sticky top-0 z-10 border-b border-border bg-surface-raised/95 px-4 py-2.5
+           text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground
+           backdrop-blur;
+  }
+
+  .data-table tbody tr {
+    @apply border-b border-border/60 transition-colors hover:bg-primary-soft/40;
+  }
+
+  .data-table tbody td {
+    @apply px-4 py-3 align-middle;
+  }
+
+  /* Numeric columns align on the decimal point. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    @apply text-right;
+  }
+}
+
+@layer utilities {
+  /* Skeleton shimmer used by loading states. */
+  .skeleton {
+    @apply relative overflow-hidden rounded-md bg-muted/70;
+  }
+
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-[shimmer_1.6s_infinite];
+    background-image: linear-gradient(
+      90deg,
+      hsl(var(--muted) / 0) 0%,
+      hsl(var(--surface) / 0.75) 50%,
+      hsl(var(--muted) / 0) 100%
+    );
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-border;
+  }
+}

@@ -1,0 +1,127 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 04:17 UTC daily. Off the hour on purpose: scheduled runs cluster on :00 and
+    # queue behind everyone else's.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    name: Dependency vulnerabilities
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  secrets:
+    name: No credential committed to the repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan tracked files for credential shapes
+        run: |
+          set -euo pipefail
+
+          # A real .env must never be tracked; gitignore is not a control.
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env is tracked in git"
+            exit 1
+          fi
+
+          # The Supabase service-role key grants full admin access to Auth and
+          # Storage and must exist only on the server.
+          if git grep -nIE 'service_role' -- ':!*.example' ':!.env.example' \
+              | grep -vE 'NEXT_PUBLIC|anon|process\.env|getenv|settings\.|\.py:' ; then
+            echo "::error::a service-role key reference may be client-facing"
+            exit 1
+          fi
+
+          echo "no committed credentials found"
+
+      - name: Confirm .env.example carries no credential values
+        run: |
+          set -euo pipefail
+
+          # Only keys whose name implies a secret are checked. Non-secret
+          # settings (ports, model names, feature flags) are expected to carry a
+          # value, so requiring every line to be empty would be wrong.
+          bad=$(grep -nE '^[A-Z0-9_]*(KEY|SECRET|PASSWORD|TOKEN|DSN)[A-Z0-9_]*=' .env.example \
+                | grep -vE '=[^=[:space:]]*$' || true)
+
+          if [ -n "$bad" ]; then
+            echo "::error::.env.example assigns a value to a secret-shaped key"
+            echo "$bad"
+            exit 1
+          fi
+
+          echo ".env.example assigns no credential values"
+
+  rls:
+    name: RLS and tenant isolation
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mytrakin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/mytrakin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "apps/api[dev]"
+
+      - name: Build the schema
+        run: python scripts/apply_migrations.py --reset
+
+      - name: Security suite
+        # Cross-tenant isolation, IDOR, privilege escalation, append-only ledgers
+        # and permission resolution, all against a real PostgreSQL.
+        run: python -m pytest apps/api/tests/test_rls_security.py -q -m security

@@ -1,0 +1,144 @@
+name: CI
+
+# Every push and pull request runs lint, typecheck, unit tests and a production
+# build. Database-backed jobs are a separate workflow because they need a real
+# PostgreSQL with the extensions Supabase uses.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: API (lint, types, unit tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy
+        run: mypy app
+
+      - name: Unit tests
+        run: python -m pytest -q tests/test_unit.py
+
+      - name: Import the application and count routes
+        # A wiring error in an import graph shows up here rather than in production.
+        run: python -c "import app.main as m; print(len(m.app.openapi()['paths']), 'paths')"
+
+  web:
+    name: Web (lint, types, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Audit production dependencies
+        # A known CVE in a shipped dependency fails the build.
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+        env:
+          # Placeholders only: the build must not require a live backend, and no
+          # real credential is ever available to a pull request.
+          NEXT_PUBLIC_SUPABASE_URL: 'https://placeholder.supabase.co'
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: 'placeholder-anon-key'
+          NEXT_PUBLIC_API_BASE_URL: 'https://placeholder.invalid'
+
+  migrations:
+    name: Migrations apply cleanly from empty
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mytrakin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/mytrakin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "apps/api[dev]"
+
+      - name: Apply every migration from empty
+        # A migration that only works against a pre-existing object is a broken
+        # migration; this is the only place that is caught cheaply.
+        run: python scripts/apply_migrations.py --reset
+
+      - name: Verify the resulting schema
+        run: python scripts/verify_schema.py
+
+      - name: Prove permission resolution returns the full set
+        run: python scripts/check_permission_resolution.py

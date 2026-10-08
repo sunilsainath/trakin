@@ -1,0 +1,175 @@
+"""Identity endpoints: profile, privacy, connections summary."""
+
+from __future__ import annotations
+
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from app.api.deps import RequestContext, require_user
+from app.schemas.common import AckResponse, Page, build_page, clamp_limit
+from app.schemas.identity import (
+    SearchHit,
+    UpdateMeRequest,
+    UserProfileResponse,
+)
+from app.services import identity
+
+router = APIRouter(prefix="/users", tags=["identity"])
+
+UserContext = Annotated[tuple[RequestContext, AsyncConnection], Depends(require_user)]
+
+
+@router.get("/me", response_model=dict[str, Any], summary="Current user profile and settings")
+async def get_me(ctx_and_conn: UserContext) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.get_me(conn, ctx.user_id)
+
+
+@router.patch("/me", response_model=dict[str, Any], summary="Update own profile")
+async def update_me(ctx_and_conn: UserContext, payload: UpdateMeRequest) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.update_me(
+        conn,
+        user_id=ctx.user_id,
+        changes=payload.model_dump(exclude_unset=True),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.put(
+    "/me/privacy",
+    response_model=AckResponse,
+    summary="Set field-level visibility",
+)
+async def set_privacy(
+    ctx_and_conn: UserContext,
+    payload: dict[str, str],
+) -> AckResponse:
+    """Visibility per field: PUBLIC, CONNECTIONS or PRIVATE.
+
+    Applied server-side before any profile payload is assembled, so a field can
+    never be returned by accident.
+    """
+    ctx, conn = ctx_and_conn
+    await identity.set_privacy(
+        conn,
+        user_id=ctx.user_id,
+        field_visibility=payload,
+        request_id=ctx.request_id,
+    )
+    return AckResponse(ok=True, message="Privacy settings saved.", request_id=ctx.request_id)
+
+
+@router.get(
+    "/{public_id}",
+    response_model=UserProfileResponse,
+    summary="View a profile as the caller is permitted to see it",
+)
+async def get_profile(ctx_and_conn: UserContext, public_id: str) -> dict[str, Any]:
+    """Returns 404, not 403, for a profile the caller may not see.
+
+    Distinguishing the two would let a caller enumerate which profiles exist.
+    """
+    ctx, conn = ctx_and_conn
+
+    row = (
+        (
+            await conn.execute(
+                text("SELECT u.id::text AS id FROM public.users u WHERE u.public_id = :pid"),
+                {"pid": public_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+    if row is None:
+        from app.core.errors import ResourceNotFoundError
+
+        raise ResourceNotFoundError("Profile not found.")
+
+    return await identity.get_profile(
+        conn, viewer_id=ctx.user_id, target_user_id=uuid.UUID(str(row["id"]))
+    )
+
+
+@router.get(
+    "/{public_id}/connections",
+    response_model=Page[SearchHit],
+    summary="List a user's visible connections",
+)
+async def list_connections(
+    ctx_and_conn: UserContext,
+    public_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    cursor: str | None = Query(None),
+) -> Page[Any]:
+    ctx, conn = ctx_and_conn
+
+    from app.core.errors import ResourceNotFoundError
+    from app.schemas.common import decode_cursor
+
+    row = (
+        (
+            await conn.execute(
+                text("SELECT u.id::text AS id FROM public.users u WHERE u.public_id = :pid"),
+                {"pid": public_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("User not found.")
+
+    params: dict[str, Any] = {"target": row["id"], "limit": clamp_limit(limit) + 1}
+    after_name: str | None = None
+    if cursor:
+        try:
+            after_name = decode_cursor(cursor).get("name")
+        except ValueError as exc:
+            raise ResourceNotFoundError("Invalid cursor.") from exc
+        if after_name:
+            params["after_name"] = after_name
+
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                SELECT u.public_id,
+                       u.first_name || ' ' || u.last_name AS display_name,
+                       p.headline
+                  FROM public.connections c
+                  JOIN public.users u ON u.id = CASE
+                        WHEN c.requester_id = CAST(:target AS uuid) THEN c.addressee_id
+                        ELSE c.requester_id END
+                  LEFT JOIN public.user_profiles p ON p.user_id = u.id
+                 WHERE c.status = 'ACCEPTED'
+                   AND (c.requester_id = CAST(:target AS uuid)
+                     OR c.addressee_id = CAST(:target AS uuid))
+                   AND NOT app.is_blocked(u.id, NULL, :viewer)
+                   AND (:after_name IS NULL
+                        || u.first_name || ' ' || u.last_name > :after_name)
+                 ORDER BY u.first_name || ' ' || u.last_name
+                 LIMIT :limit
+                """
+                ),
+                {**params, "viewer": ctx.user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+
+    return build_page(
+        [dict(r) for r in rows],
+        limit=clamp_limit(limit),
+        cursor_keys=("display_name",),
+        request_id=ctx.request_id,
+    )
