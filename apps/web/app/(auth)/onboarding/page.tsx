@@ -92,7 +92,7 @@ export default function OnboardingPage() {
     setNotice(null)
     try {
       await api.post('/users/me/onboarding')
-      router.replace('/dashboard')
+      router.replace('/feed')
       router.refresh()
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : 'Could not finish onboarding.')

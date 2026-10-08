@@ -60,7 +60,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Workspace',
     items: [
       { href: '/dashboard', label: 'Dashboard', icon: <LayoutDashboard aria-hidden /> },
-      { href: '/feed', label: 'Activity', icon: <History aria-hidden /> },
+      { href: '/feed', label: 'Feed', icon: <History aria-hidden /> },
       {
         href: '/network',
         label: 'Network',

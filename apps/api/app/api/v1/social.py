@@ -189,6 +189,23 @@ async def list_connections(
     return {"data": rows, "request_id": ctx.request_id}
 
 
+@router.get("/connections/suggestions", summary="Suggested people and companies")
+async def connection_suggestions(
+    ctx_and_conn: ConnectionsRead,
+    people_limit: int = Query(5, ge=1, le=25),
+    company_limit: int = Query(3, ge=1, le=10),
+) -> dict[str, Any]:
+    """Friends-of-friends and their employers, excluding every existing tie."""
+    ctx, conn = ctx_and_conn
+    suggestions = await social_service.suggestion_lists(
+        conn,
+        viewer_id=ctx.user_id,
+        people_limit=people_limit,
+        company_limit=company_limit,
+    )
+    return {**suggestions, "request_id": ctx.request_id}
+
+
 @router.post("/connections/requests", status_code=201, summary="Send a connection request")
 async def send_request(ctx_and_conn: ConnectionsWrite, payload: dict[str, Any]) -> dict[str, Any]:
     ctx, conn = ctx_and_conn

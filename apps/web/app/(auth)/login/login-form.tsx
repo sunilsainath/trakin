@@ -52,7 +52,7 @@ export function LoginForm() {
 function LoginFormInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const next = searchParams.get('next') ?? '/dashboard'
+  const next = searchParams.get('next') ?? '/feed'
 
   const [notice, setNotice] = React.useState<{ tone: 'info' | 'danger'; text: string } | null>(
     searchParams.get('error') === 'unverified'

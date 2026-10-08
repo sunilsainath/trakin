@@ -8,12 +8,14 @@ import {
   ChevronDown,
   LogOut,
   Menu,
+  MessageCircle,
   Moon,
   Search,
   Settings,
   Sun,
   Building2,
   User as UserIcon,
+  Users,
   X,
 } from 'lucide-react'
 
@@ -99,7 +101,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
         >
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-            <a href="/dashboard" className="flex items-center gap-2">
+            <a href="/feed" className="flex items-center gap-2">
               <span
                 aria-hidden
                 className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-2xs font-bold text-primary-foreground"
@@ -213,6 +215,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Button variant="ghost" size="icon-sm" asChild>
               <a href="/search" aria-label="Global search">
                 <Search />
+              </a>
+            </Button>
+
+            <Button variant="ghost" size="icon-sm" asChild>
+              <a href="/network" aria-label="Connections">
+                <Users />
+              </a>
+            </Button>
+
+            <Button variant="ghost" size="icon-sm" asChild>
+              <a href="/messages" aria-label="Messenger" className="relative">
+                <MessageCircle />
+                {unread.messages > 0 ? (
+                  <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-danger ring-2 ring-surface" />
+                ) : null}
               </a>
             </Button>
 

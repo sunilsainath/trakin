@@ -16,9 +16,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 
 from app.core.errors import BusinessRuleViolationError, ResourceNotFoundError, ValidationError
 
@@ -464,3 +466,153 @@ async def test_webhook_rejects_and_dedupes(conn, skeleton, tenants, monkeypatch)
     finally:
         monkeypatch.undo()
         get_settings.cache_clear()
+
+
+# =============================================================================
+# connection suggestions
+# =============================================================================
+async def _stranger(conn, tag: str) -> dict[str, Any]:
+    """A user outside every fixture company, for graph tests."""
+    from app.core.security import provision_user
+
+    user_id = uuid.UUID(
+        await provision_user(
+            conn,
+            str(uuid.uuid4()),
+            email=f"suggest_{tag}_{uuid.uuid4().hex[:6]}@example.test",
+            first_name=tag.title(),
+            verified=True,
+        )
+    )
+    row = (
+        (
+            await conn.execute(
+                text("SELECT public_id FROM public.users WHERE id = :uid"),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    assert row is not None
+    return {"user_id": user_id, "user_public_id": str(row["public_id"])}
+
+
+async def _connect(conn, a: Any, b: Any) -> None:
+    """An ACCEPTED connection between two test users."""
+    from app.services import social
+
+    def _uid(u: Any) -> uuid.UUID:
+        return u.user_id if hasattr(u, "user_id") else u["user_id"]
+
+    def _pid(u: Any) -> str:
+        return u.user_public_id if hasattr(u, "user_public_id") else u["user_public_id"]
+
+    await social.send_request(
+        conn,
+        actor_user_id=_uid(a),
+        target_public_id=_pid(b),
+        request_id="pytest",
+        message=None,
+    )
+    await social.respond_request(
+        conn,
+        actor_user_id=_uid(b),
+        requester_public_id=_pid(a),
+        request_id="pytest",
+        accept=True,
+    )
+
+
+async def test_suggestions_surface_mutual_connections(conn, skeleton, tenants) -> None:
+    """Friends-of-friends appear with mutual counts; ties and self do not."""
+    _ = skeleton
+    from app.services import social
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    stranger = await _stranger(conn, "far")
+    await _connect(conn, admin, worker)
+    await _connect(conn, worker, stranger)
+
+    suggestions = await social.suggestion_lists(conn, viewer_id=admin.user_id)
+    people = {p["user_public_id"]: p for p in suggestions["people"]}
+    assert stranger["user_public_id"] in people
+    assert people[stranger["user_public_id"]]["mutual_count"] == 1
+    assert people[stranger["user_public_id"]]["display_name"] == "Far"
+    assert worker.user_public_id not in people
+    assert admin.user_public_id not in people
+
+    from_stranger = await social.suggestion_lists(conn, viewer_id=stranger["user_id"])
+    assert admin.user_public_id in {p["user_public_id"] for p in from_stranger["people"]}
+
+
+async def test_suggestions_exclude_pending_blocked_and_unconnected(conn, skeleton, tenants) -> None:
+    """Pending requests, blocks and zero-mutual strangers are never suggested."""
+    _ = skeleton
+    from app.services import social
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    pending = await _stranger(conn, "pending")
+    blocked = await _stranger(conn, "blocked")
+    lone = await _stranger(conn, "lone")
+    await _connect(conn, admin, worker)
+
+    await social.send_request(
+        conn,
+        actor_user_id=admin.user_id,
+        target_public_id=pending["user_public_id"],
+        request_id="pytest",
+        message=None,
+    )
+    await social.block_user(
+        conn,
+        actor_user_id=admin.user_id,
+        target_public_id=blocked["user_public_id"],
+        request_id="pytest",
+    )
+
+    people = {
+        p["user_public_id"]
+        for p in (await social.suggestion_lists(conn, viewer_id=admin.user_id))["people"]
+    }
+    assert pending["user_public_id"] not in people
+    assert blocked["user_public_id"] not in people
+    assert lone["user_public_id"] not in people
+
+
+async def test_suggestions_companies_exclude_own(conn, skeleton, tenants) -> None:
+    """Employers of connections surface; the viewer's own companies never do."""
+    _ = skeleton
+    from app.services import social
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    stranger = await _stranger(conn, "hired")
+    await _connect(conn, admin, worker)
+    await _connect(conn, worker, stranger)
+
+    role_id = (
+        await conn.execute(
+            text(
+                "SELECT id::text FROM public.company_roles"
+                " WHERE company_id = :cid AND key = 'SUPER_ADMIN'"
+            ),
+            {"cid": worker.company_id},
+        )
+    ).scalar_one()
+    await conn.execute(
+        text(
+            """
+            INSERT INTO public.company_memberships
+              (company_id, user_id, role_id, status, joined_at)
+            VALUES (CAST(:cid AS uuid), CAST(:uid AS uuid), CAST(:rid AS uuid),
+                    'ACTIVE', now())
+            """
+        ),
+        {"cid": worker.company_id, "uid": stranger["user_id"], "rid": role_id},
+    )
+
+    companies = (await social.suggestion_lists(conn, viewer_id=admin.user_id))["companies"]
+    by_id = {c["company_public_id"]: c for c in companies}
+    assert worker.company_public_id in by_id
+    assert by_id[worker.company_public_id]["connections_count"] >= 1
+    assert admin.company_public_id not in by_id

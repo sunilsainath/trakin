@@ -631,6 +631,125 @@ async def list_connections(
     return out
 
 
+async def suggestion_lists(
+    conn: AsyncConnection,
+    *,
+    viewer_id: uuid.UUID,
+    people_limit: int = 5,
+    company_limit: int = 3,
+) -> dict[str, list[dict[str, Any]]]:
+    """People and companies worth connecting with, read off the live graph.
+
+    People are friends-of-friends ordered by mutual-connection count, excluding
+    the viewer, anyone already connected in any status, anyone with a pending
+    request in either direction, and anyone blocked in either direction.
+    Companies are the ACTIVE employers of the viewer's connections, excluding
+    the viewer's own companies, ordered by how many of the viewer's
+    connections work there. Both lists are empty — never fabricated — when
+    the graph has nothing to suggest.
+    """
+    people = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    WITH mine AS (
+                        SELECT CASE WHEN c.requester_id = :viewer THEN c.addressee_id
+                                    ELSE c.requester_id END AS friend
+                          FROM public.connections c
+                         WHERE c.status = 'ACCEPTED'
+                           AND (c.requester_id = :viewer OR c.addressee_id = :viewer)
+                    )
+                    SELECT u.public_id AS user_public_id,
+                           NULLIF(TRIM(u.first_name || ' ' || u.last_name), '')
+                               AS display_name,
+                           up.headline AS headline,
+                           COUNT(*) AS mutual_count
+                      FROM public.connections c
+                      JOIN mine m
+                        ON c.requester_id = m.friend OR c.addressee_id = m.friend
+                      JOIN public.users u
+                        ON u.id = CASE WHEN c.requester_id = m.friend
+                                       THEN c.addressee_id ELSE c.requester_id END
+                      LEFT JOIN public.user_profiles up ON up.user_id = u.id
+                     WHERE c.status = 'ACCEPTED'
+                       AND u.id <> :viewer
+                       AND NOT EXISTS (
+                             SELECT 1 FROM public.connections x
+                              WHERE ((x.requester_id = :viewer AND x.addressee_id = u.id)
+                                  OR (x.requester_id = u.id AND x.addressee_id = :viewer)))
+                       AND NOT EXISTS (
+                             SELECT 1 FROM public.connection_requests r
+                              WHERE r.status = 'PENDING'
+                                AND ((r.requester_id = :viewer AND r.addressee_id = u.id)
+                                  OR (r.requester_id = u.id AND r.addressee_id = :viewer)))
+                       AND NOT app.is_blocked(:viewer, u.id)
+                     GROUP BY u.public_id, u.first_name, u.last_name, up.headline
+                     ORDER BY mutual_count DESC, u.public_id
+                     LIMIT :plimit
+                    """
+                ),
+                {"viewer": viewer_id, "plimit": people_limit},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    companies = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    WITH mine AS (
+                        SELECT CASE WHEN c.requester_id = :viewer THEN c.addressee_id
+                                    ELSE c.requester_id END AS friend
+                          FROM public.connections c
+                         WHERE c.status = 'ACCEPTED'
+                           AND (c.requester_id = :viewer OR c.addressee_id = :viewer)
+                    )
+                    SELECT c.public_id AS company_public_id,
+                           COALESCE(c.display_name, c.legal_name) AS name,
+                           COUNT(DISTINCT m.user_id) AS connections_count
+                      FROM public.company_memberships m
+                      JOIN public.companies c ON c.id = m.company_id
+                     WHERE m.status = 'ACTIVE'
+                       AND m.user_id IN (SELECT friend FROM mine)
+                       AND c.deleted_at IS NULL
+                       AND c.id NOT IN (
+                             SELECT company_id FROM public.company_memberships
+                              WHERE user_id = :viewer AND status = 'ACTIVE')
+                     GROUP BY c.public_id, c.display_name, c.legal_name
+                     ORDER BY connections_count DESC, c.public_id
+                     LIMIT :climit
+                    """
+                ),
+                {"viewer": viewer_id, "climit": company_limit},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return {
+        "people": [
+            {
+                "user_public_id": str(r["user_public_id"]),
+                "display_name": r["display_name"],
+                "headline": r["headline"],
+                "mutual_count": int(r["mutual_count"]),
+            }
+            for r in people
+        ],
+        "companies": [
+            {
+                "company_public_id": str(r["company_public_id"]),
+                "name": r["name"],
+                "connections_count": int(r["connections_count"]),
+            }
+            for r in companies
+        ],
+    }
+
+
 async def block_user(
     conn: AsyncConnection, *, actor_user_id: uuid.UUID, target_public_id: str, request_id: str
 ) -> None:
