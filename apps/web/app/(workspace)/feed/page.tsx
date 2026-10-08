@@ -52,18 +52,33 @@ export default function FeedPage() {
             <CardTitle>Modules</CardTitle>
           </CardHeader>
           <CardContent className="space-y-0.5">
-            <nav aria-label="Product modules">
-              {MODULES.map((module) => (
+            {activeCompanyPublicId ? (
+              <nav aria-label="Product modules">
+                {MODULES.map((module) => (
+                  <Link
+                    key={module.href}
+                    href={module.href}
+                    className="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
+                  >
+                    <module.icon aria-hidden className="size-4 text-muted-foreground" />
+                    {module.label}
+                  </Link>
+                ))}
+              </nav>
+            ) : (
+              <div className="space-y-2 px-1 py-1">
+                <p className="text-xs text-muted-foreground">
+                  Modules unlock once you belong to a company.
+                </p>
                 <Link
-                  key={module.href}
-                  href={module.href}
-                  className="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted"
+                  href="/companies"
+                  className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium text-primary hover:underline"
                 >
-                  <module.icon aria-hidden className="size-4 text-muted-foreground" />
-                  {module.label}
+                  <Building2 aria-hidden className="size-4" />
+                  Go to Business
                 </Link>
-              ))}
-            </nav>
+              </div>
+            )}
             <div className="pt-2">
               <button
                 type="button"

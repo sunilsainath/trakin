@@ -23,7 +23,7 @@ import { cn, initials } from '@/lib/utils'
 import { getSupabase } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
 import { useRealtimeInsert } from '@/hooks/use-realtime'
-import { Badge, Button, ProgressBar } from '@/components/ui'
+import { Badge, Button } from '@/components/ui'
 import {
   NAV_SECTIONS,
   NavLink,
@@ -147,17 +147,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </div>
             ))}
           </nav>
-
-          <div className="shrink-0 border-t border-border p-3">
-            <p className="px-3 pb-2 text-2xs text-subtle-foreground">
-              {me?.onboarding_completed ? 'Workspace ready' : 'Finish onboarding'}
-            </p>
-            <ProgressBar
-              value={me?.onboarding_completed ? 100 : 40}
-              tone={me?.onboarding_completed ? 'success' : 'primary'}
-              label="Onboarding progress"
-            />
-          </div>
         </aside>
 
         {mobileOpen && !hideSidebar ? (
@@ -338,7 +327,7 @@ function CompanySwitcher({ onSelect }: { onSelect: () => void }) {
           Create a company to start collaborating with your team.
         </p>
         <Button className="mt-3 w-full" size="sm" asChild>
-          <a href="/companies/new" onClick={onSelect}>
+          <a href="/companies" onClick={onSelect}>
             Create company
           </a>
         </Button>

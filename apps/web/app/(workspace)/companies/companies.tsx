@@ -6,7 +6,7 @@ import { Building2, Check } from 'lucide-react'
 
 import { api, createIdempotencyKey } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
-import { useCompanyMutation } from '@/hooks/use-mutations'
+import { useCompanyMutation, uploadFoundingW9 } from '@/hooks/use-mutations'
 import { formatDate } from '@/lib/utils'
 import type { Company } from '@/lib/types'
 import {
@@ -272,15 +272,36 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
   const [open, setOpen] = React.useState(false)
   const [values, setValues] = React.useState<CompanyFormValues>(EMPTY)
   const [errors, setErrors] = React.useState<Partial<Record<string, string>>>({})
+  const [w9, setW9] = React.useState<{ public_id: string; name: string } | null>(null)
+  const [uploadingW9, setUploadingW9] = React.useState(false)
 
   React.useEffect(() => {
     if (open) {
       setValues(EMPTY)
       setErrors({})
+      setW9(null)
     }
   }, [open])
 
-  const create = useCompanyMutation<Company, CompanyFormValues>({
+  const uploadW9 = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setUploadingW9(true)
+    try {
+      const uploaded = await uploadFoundingW9(file)
+      setW9({ public_id: uploaded.public_id, name: file.name })
+      setErrors((previous) => ({ ...previous, w9: undefined }))
+    } catch (cause) {
+      setErrors((previous) => ({
+        ...previous,
+        w9: cause instanceof Error ? cause.message : 'That upload did not work.',
+      }))
+    } finally {
+      setUploadingW9(false)
+    }
+  }
+
+  const create = useCompanyMutation<Company, CompanyFormValues & { w9_document_public_id: string }>({
     context: { companyPublicId: activeCompanyPublicId },
     mutationFn: (form) => {
       const idempotencyKey = createIdempotencyKey('company')
@@ -293,6 +314,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
           default_currency: form.default_currency,
           city: form.city || undefined,
           region: form.region || undefined,
+          w9_document_public_id: form.w9_document_public_id,
         },
         { companyPublicId: activeCompanyPublicId, idempotencyKey },
       )
@@ -321,11 +343,15 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
       setErrors(next)
       return
     }
+    if (!w9) {
+      setErrors({ w9: 'Upload the founding W-9 first — a company cannot be created without one.' })
+      return
+    }
 
     setErrors({})
 
     try {
-      await create.mutateAsync(parsed.data)
+      await create.mutateAsync({ ...parsed.data, w9_document_public_id: w9.public_id })
     } catch (cause) {
       notifyError(cause, 'The company could not be created.')
     }
@@ -355,6 +381,28 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
         }
       >
         <form id="create-company" onSubmit={submit} className="space-y-4">
+          <div className="rounded-md border border-border p-3">
+            <p className="text-sm font-medium">Founding W-9 (PDF or image)</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {w9 ? `Attached: ${w9.name}` : 'Required before the company can be created.'}
+            </p>
+            <input
+              type="file"
+              accept="application/pdf,image/*"
+              disabled={uploadingW9}
+              onChange={(event) => void uploadW9(event)}
+              className="mt-2 text-sm"
+              aria-label="W-9 file"
+            />
+            {uploadingW9 ? (
+              <p className="mt-1 text-xs text-muted-foreground">Uploading…</p>
+            ) : null}
+            {errors.w9 ? (
+              <p role="alert" className="mt-1 text-xs font-medium text-danger">
+                {errors.w9}
+              </p>
+            ) : null}
+          </div>
           <Field label="Legal name" error={errors.legal_name} required>
             <Input
               id="company-legal-name"
