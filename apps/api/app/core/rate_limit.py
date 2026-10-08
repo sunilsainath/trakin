@@ -13,9 +13,11 @@ Design notes:
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import redis.asyncio as aioredis
+from fastapi import Request
 from redis.exceptions import RedisError
 
 from app.core.config import Settings, get_settings
@@ -100,6 +102,27 @@ class RateLimiter:
             # stubs still only declare the sync `close`, though both exist.
             await self._redis.aclose()  # type: ignore[attr-defined]
             self._redis = None
+
+
+def rate_limited(bucket: str) -> Callable[[Request], Awaitable[None]]:
+    """FastAPI dependency enforcing the named bucket, keyed by client IP.
+
+    Per-user AI spend is enforced separately in SQL (`ai_tokens_today`); this
+    is the abuse layer: cheap, IP-keyed, failing open when Redis is down
+    (except that it never fails a request by itself — see `check`).
+    """
+
+    async def dependency(request: Request) -> None:
+        forwarded = request.headers.get("x-forwarded-for") if request else None
+        if forwarded:
+            subject = forwarded.split(",")[0].strip()
+        elif request and request.client:
+            subject = request.client.host
+        else:
+            subject = "unknown"
+        await get_rate_limiter().check(bucket, subject, limit_for(bucket))
+
+    return dependency
 
 
 _limiter: RateLimiter | None = None

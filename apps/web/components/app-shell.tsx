@@ -20,6 +20,7 @@ import {
 import { cn, initials } from '@/lib/utils'
 import { getSupabase } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
+import { useRealtimeInsert } from '@/hooks/use-realtime'
 import { Badge, Button, ProgressBar } from '@/components/ui'
 import {
   NAV_SECTIONS,
@@ -31,8 +32,22 @@ import {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const { me, unread } = useCompany()
+  const { me, unread, refreshUnread } = useCompany()
   const sections = useVisibleNavigation()
+
+  // Badge nudge: realtime INSERTs refresh counts immediately; the 60s poll in
+  // useCompany remains the source of truth. RLS scopes delivery to own rows.
+  const [authId, setAuthId] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    void getSupabase().auth.getUser().then(({ data }) => setAuthId(data.user?.id ?? null))
+  }, [])
+  useRealtimeInsert({
+    schema: 'platform',
+    table: 'notifications',
+    filter: authId ? `user_id=eq.${authId}` : undefined,
+    onInsert: () => void refreshUnread(),
+    enabled: authId !== null,
+  })
 
   const [mobileOpen, setMobileOpen] = React.useState(false)
   const [switcherOpen, setSwitcherOpen] = React.useState(false)

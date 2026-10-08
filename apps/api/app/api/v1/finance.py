@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.api.deps import RequestContext, company_scope, require_permission
 from app.core.clock import utc_today
 from app.core.logging import get_logger
+from app.core.rate_limit import rate_limited
 from app.schemas.common import AckResponse, Page, build_page, clamp_limit, decode_cursor
 from app.schemas.finance import (
     AllocatePaymentRequest,
@@ -577,6 +578,7 @@ async def list_payments(
     response_model=PaymentResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Record a payment",
+    dependencies=[Depends(rate_limited("payments"))],
 )
 async def record_payment(
     ctx_and_conn: PaymentsCreate, payload: RecordPaymentRequest
@@ -788,6 +790,7 @@ async def exchange_public_token(
     "/bank-accounts/connections/{connection_id}/sync",
     response_model=SyncResultResponse,
     summary="Import transactions for a connection",
+    dependencies=[Depends(rate_limited("bank_sync"))],
 )
 async def sync_connection(
     ctx_and_conn: PaymentsBank, connection_id: str, payload: SyncConnectionRequest | None = None
@@ -1091,7 +1094,11 @@ async def cancel_schedule(ctx_and_conn: PaymentsCreate, schedule_id: str) -> dic
     )
 
 
-@router.post("/payment-schedules/run-due", summary="Create today's due occurrences")
+@router.post(
+    "/payment-schedules/run-due",
+    summary="Create today's due occurrences",
+    dependencies=[Depends(rate_limited("payments"))],
+)
 async def run_due_schedules(ctx_and_conn: PaymentsCreate) -> dict[str, Any]:
     from app.services import schedules as schedule_service
 
@@ -1108,7 +1115,11 @@ async def run_due_schedules(ctx_and_conn: PaymentsCreate) -> dict[str, Any]:
 # =============================================================================
 # processor webhooks (signature is the authentication: no user session)
 # =============================================================================
-@router.post("/payments/webhooks/{provider}", summary="Processor webhook ingest")
+@router.post(
+    "/payments/webhooks/{provider}",
+    summary="Processor webhook ingest",
+    dependencies=[Depends(rate_limited("payments"))],
+)
 async def processor_webhook(provider: str, request: Request) -> dict[str, Any]:
     """Verify, persist idempotently, and fan out for background processing.
 

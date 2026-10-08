@@ -40,6 +40,8 @@ interface CompanyContextValue {
   switchCompany: (publicId: string) => Promise<void>
   refresh: () => Promise<void>
   setUnread: (next: UnreadCounts) => void
+  /** Re-pull badge counts now (realtime nudge); polling covers the rest. */
+  refreshUnread: () => Promise<void>
 }
 
 const CompanyContext = createContext<CompanyContextValue | null>(null)
@@ -219,6 +221,9 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
       switchCompany,
       refresh: load,
       setUnread,
+      refreshUnread: async () => {
+        await loadUnread()
+      },
     }),
     [
       me,
@@ -235,6 +240,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
       switchCompany,
       setUnread,
       load,
+      loadUnread,
     ],
   )
 

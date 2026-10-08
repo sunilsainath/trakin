@@ -30,6 +30,7 @@ from app.api.deps import (
 )
 from app.core.errors import PermissionDeniedError
 from app.core.logging import get_logger
+from app.core.rate_limit import rate_limited
 from app.schemas.common import AckResponse
 from app.services import flags
 
@@ -102,7 +103,11 @@ async def capabilities(ctx_and_conn: Context) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------- assistant
-@router.post("/assistant", summary="Ask a question about authorised company data")
+@router.post(
+    "/assistant",
+    summary="Ask a question about authorised company data",
+    dependencies=[Depends(rate_limited("ai"))],
+)
 async def ask(ctx_and_conn: AssistantContext, payload: dict[str, Any]) -> dict[str, Any]:
     """RAG over the caller's company, permission-filtered before retrieval.
 
@@ -198,6 +203,7 @@ async def list_agents(ctx_and_conn: Context) -> dict[str, Any]:
     "/agents/{agent_key}/plan",
     response_model=dict[str, Any],
     summary="Ask an agent to propose an action",
+    dependencies=[Depends(rate_limited("ai"))],
 )
 async def plan_action(
     ctx_and_conn: AgentContext, agent_key: str, payload: dict[str, Any]
@@ -339,7 +345,11 @@ async def usage(
     return {"period": "today", **usage}
 
 
-@router.get("/briefing", summary="Personalized daily briefing")
+@router.get(
+    "/briefing",
+    summary="Personalized daily briefing",
+    dependencies=[Depends(rate_limited("ai"))],
+)
 async def briefing(ctx_and_conn: Context) -> dict[str, Any]:
     """What needs attention: expiring contracts, overdue invoices, pending
     timesheets and MSA requests — each section gated on its own permission."""
@@ -352,7 +362,11 @@ async def briefing(ctx_and_conn: Context) -> dict[str, Any]:
     return {**result, "request_id": ctx.request_id}
 
 
-@router.post("/automations/draft", summary="Draft an automation from words")
+@router.post(
+    "/automations/draft",
+    summary="Draft an automation from words",
+    dependencies=[Depends(rate_limited("ai"))],
+)
 async def draft_automation(
     ctx_and_conn: Annotated[
         tuple[RequestContext, AsyncConnection],

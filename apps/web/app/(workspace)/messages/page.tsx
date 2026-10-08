@@ -5,6 +5,7 @@ import { z } from 'zod'
 
 import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
+import { useRealtimeInsert } from '@/hooks/use-realtime'
 import { PageHeader, PageShell } from '@/components/page'
 import { Alert, Button, Card, CardContent, CardHeader, CardTitle, EmptyState } from '@/components/ui'
 import { SchemaForm, type FieldConfig } from '@/components/ui/schema-form'
@@ -68,6 +69,17 @@ export default function MessagesPage() {
     setMessages(rows.data)
     void loadThreads()
   }
+
+  // Live thread: a peer message refetches the open conversation. Reading the
+  // thread marks it read server-side, so badges settle without a reload.
+  useRealtimeInsert({
+    schema: 'public',
+    table: 'messages',
+    onInsert: () => {
+      if (active) void openThread(active)
+    },
+    enabled: active !== null,
+  })
 
   const startConversation = async () => {
     const target = peer.trim()

@@ -333,8 +333,12 @@ async def update_assignment(
             await conn.execute(
                 text(
                     """
-                    SELECT * FROM public.assignments
-                     WHERE id = :rid AND company_id = :cid FOR UPDATE
+                    SELECT a.id, a.contract_id, a.contract_role_id, a.project_id,
+                           a.company_id, a.user_id, a.role_title, a.hourly_rate,
+                           a.currency, a.start_date, a.end_date, a.status,
+                           a.allocation_pct, a.source, a.created_at, a.updated_at
+                      FROM public.assignments a
+                     WHERE a.id = :rid AND a.company_id = :cid FOR UPDATE
                     """
                 ),
                 {"rid": assignment_id, "cid": company_id},
@@ -397,8 +401,12 @@ async def end_assignment(
             await conn.execute(
                 text(
                     """
-                    SELECT * FROM public.assignments
-                     WHERE id = :rid AND company_id = :cid FOR UPDATE
+                    SELECT a.id, a.contract_id, a.contract_role_id, a.project_id,
+                           a.company_id, a.user_id, a.role_title, a.hourly_rate,
+                           a.currency, a.start_date, a.end_date, a.status,
+                           a.allocation_pct, a.source, a.created_at, a.updated_at
+                      FROM public.assignments a
+                     WHERE a.id = :rid AND a.company_id = :cid FOR UPDATE
                     """
                 ),
                 {"rid": assignment_id, "cid": company_id},
@@ -780,7 +788,15 @@ async def list_entries(conn: AsyncConnection, *, timesheet_id: uuid.UUID) -> lis
 async def _timesheet_row(
     conn: AsyncConnection, *, company_id: uuid.UUID, public_id: str, lock: bool = False
 ) -> dict[str, Any]:
-    base = "SELECT * FROM public.timesheets WHERE public_id = :pid AND company_id = :cid"
+    base = (
+        "SELECT t.id, t.public_id, t.user_id, t.company_id, t.assignment_id, "
+        "t.contract_id, t.contract_role_id, t.project_id, t.period_start, t.period_end, "
+        "t.billing_frequency, t.status, t.total_hours, t.billable_hours, t.total_amount, "
+        "t.currency, t.entry_count, t.current_step, t.locked_at, t.locked_by, "
+        "t.submitted_at, t.approved_at, t.rejection_reason, t.adjustment_of, "
+        "t.is_adjustment, t.ai_imported, t.ai_import_batch, t.created_at, t.updated_at "
+        "FROM public.timesheets t WHERE t.public_id = :pid AND t.company_id = :cid"
+    )
     sql = base + (" FOR UPDATE" if lock else "")
     row = (await conn.execute(text(sql), {"pid": public_id, "cid": company_id})).mappings().first()
     if row is None:

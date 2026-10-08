@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.api.deps import RequestContext, require_permission
 from app.core.logging import get_logger
+from app.core.rate_limit import rate_limited
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
 from app.services import social as social_service
 
@@ -73,7 +74,12 @@ async def feed(
     )
 
 
-@router.post("/posts", status_code=201, summary="Create a post")
+@router.post(
+    "/posts",
+    status_code=201,
+    summary="Create a post",
+    dependencies=[Depends(rate_limited("default"))],
+)
 async def create_post(ctx_and_conn: PostsCreate, payload: dict[str, Any]) -> dict[str, Any]:
     ctx, conn = ctx_and_conn
     return await social_service.create_post(

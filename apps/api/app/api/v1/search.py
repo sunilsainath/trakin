@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.api.deps import RequestContext, require_company_member
 from app.core.logging import get_logger
+from app.core.rate_limit import rate_limited
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
 from app.schemas.identity import SearchHit
 
@@ -35,7 +36,12 @@ ENTITY_TYPES = (
 )
 
 
-@router.get("", response_model=Page[SearchHit], summary="Permission-aware global search")
+@router.get(
+    "",
+    response_model=Page[SearchHit],
+    summary="Permission-aware global search",
+    dependencies=[Depends(rate_limited("search"))],
+)
 async def search(
     ctx_and_conn: Context,
     q: str = Query(..., min_length=2, max_length=200),

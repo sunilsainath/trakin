@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.api.deps import RequestContext, require_permission
+from app.core.rate_limit import rate_limited
 from app.services import messaging as messaging_service
 
 router = APIRouter(tags=["messaging"])
@@ -60,7 +61,12 @@ async def read_thread(
     return {"data": rows, "request_id": ctx.request_id}
 
 
-@router.post("/conversations/{conversation_id}/messages", status_code=201, summary="Send a message")
+@router.post(
+    "/conversations/{conversation_id}/messages",
+    status_code=201,
+    summary="Send a message",
+    dependencies=[Depends(rate_limited("messaging"))],
+)
 async def send_message(
     ctx_and_conn: MessagesSend, conversation_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:

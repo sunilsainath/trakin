@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.api.deps import RequestContext, company_scope, require_permission
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.rate_limit import rate_limited
 from app.schemas.common import AckResponse
 from app.services import documents as document_service
 
@@ -52,7 +53,12 @@ async def list_documents(
     return {"data": rows, "meta": {"limit": limit, "offset": offset}, "request_id": ctx.request_id}
 
 
-@router.post("/documents", status_code=status.HTTP_201_CREATED, summary="Upload a document")
+@router.post(
+    "/documents",
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a document",
+    dependencies=[Depends(rate_limited("upload"))],
+)
 async def upload_document(
     ctx_and_conn: DocumentsUpload,
     file: Annotated[UploadFile, File(description="The file to upload")],

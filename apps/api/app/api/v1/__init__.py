@@ -9,6 +9,9 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    admin as admin_module,
+)
+from app.api.v1 import (
     ai as ai_module,
 )
 from app.api.v1 import (
@@ -81,5 +84,8 @@ api_router.include_router(messages_module.router)
 
 api_router.include_router(search_module.router)
 api_router.include_router(ai_module.router)
+
+# Platform administration: unreachable without an explicit platform grant.
+api_router.include_router(admin_module.router)
 
 __all__ = ["api_router"]

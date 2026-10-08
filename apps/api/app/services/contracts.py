@@ -451,8 +451,11 @@ async def create_contract(
     if contract_value is None:
         contract_value = sow.get("max_total_amount")
 
+    from app.services.billing import money
+
     metadata = {
-        "contract_value": float(contract_value) if contract_value is not None else None,
+        # Decimal-safe: JSON cannot carry Decimal, so persist the exact string.
+        "contract_value": str(money(contract_value)) if contract_value is not None else None,
         "terms_snapshot": payload.get("terms_snapshot") or {},
         "renewal": {
             "auto_renew": payload.get("auto_renew", False),
@@ -784,7 +787,9 @@ async def update_contract(
     metadata = json_or_empty(before.get("metadata"))
     new_metadata = dict(metadata)
     if changes.get("contract_value") is not None:
-        new_metadata["contract_value"] = float(as_decimal(changes["contract_value"]))
+        from app.services.billing import money
+
+        new_metadata["contract_value"] = str(money(changes["contract_value"]))
 
     if updates:
         assignments = ", ".join(f"{col} = :{col}" for col in updates)
@@ -1367,7 +1372,9 @@ async def renew_contract(
     )
     metadata["renewals"] = history
     if contract_value is not None:
-        metadata["contract_value"] = float(as_decimal(contract_value))
+        from app.services.billing import money
+
+        metadata["contract_value"] = str(money(contract_value))
 
     await conn.execute(
         text(
