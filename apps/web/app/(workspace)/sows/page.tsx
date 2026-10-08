@@ -2,12 +2,26 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { FileSignature } from 'lucide-react'
+import { useRouter } from 'next/navigation'
+import { z } from 'zod'
+import { FileSignature, Plus } from 'lucide-react'
 
+import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
+import { useCompanyMutation } from '@/hooks/use-mutations'
 import { formatCurrency, formatDate } from '@/lib/utils'
-import { SOW_STATUSES, type Page as PageEnvelope, type Sow } from '@/lib/domain-types'
-import { Button, EmptyState } from '@/components/ui'
+import { statusLabel } from '@/lib/status'
+import {
+  BILLING_BASES,
+  BILLING_FREQUENCIES,
+  SOW_STATUSES,
+  type Page as PageEnvelope,
+  type Project,
+  type Sow,
+} from '@/lib/domain-types'
+import { Button, Dialog, EmptyState, Input, Select } from '@/components/ui'
+import { CurrencySelect, DateInput, Field, FieldGrid } from '@/components/forms'
+import { notifyError, notifySuccess } from '@/components/toast'
 import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
 import { PublicId } from '@/components/public-id'
@@ -126,11 +140,7 @@ export default function SowsPage() {
           crumbs={[{ label: 'Statements of Work' }]}
           title="Statements of work"
           description="What was promised, to whom, and at which roles and rates. Contracts are generated from an approved SOW."
-          actions={
-            <Link href="/projects">
-              <Button variant="outline">Choose a project</Button>
-            </Link>
-          }
+          actions={<CreateSowDialog />}
         />
 
         <FilterBar
@@ -210,9 +220,7 @@ onClick={() => {
                         Clear filters
                       </Button>
                     ) : (
-                      <Link href="/projects">
-                        <Button>Open projects</Button>
-                      </Link>
+                      <CreateSowDialog triggerLabel="Create the first SOW" />
                     )
                   }
                 />
@@ -232,5 +240,255 @@ onClick={() => {
         )}
       </div>
     </PageShell>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Create SOW                                                                 */
+/* -------------------------------------------------------------------------- */
+
+const sowSchema = z
+  .object({
+    project_id: z.string().min(1, 'Choose the project this SOW belongs to.'),
+    title: z.string().trim().min(2, 'Give the SOW a title.').max(200),
+    description: z.string().trim().max(20000).optional(),
+    sow_type: z.enum(['COMPANY', 'INDIVIDUAL']),
+    counterparty_company_id: z.string().trim().optional(),
+    currency: z.string().length(3),
+    billing_basis: z.enum(['TIMESHEET', 'FIXED', 'RECURRING', 'USAGE', 'MILESTONE']),
+    billing_frequency: z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'CUSTOM']),
+    start_date: z.string().optional(),
+    end_date: z.string().optional(),
+  })
+  .refine((values) => !values.start_date || !values.end_date || values.end_date >= values.start_date, {
+    message: 'The end date cannot be before the start date.',
+    path: ['end_date'],
+  })
+
+type SowFormValues = z.infer<typeof sowSchema>
+
+const EMPTY_SOW: SowFormValues = {
+  project_id: '',
+  title: '',
+  description: '',
+  sow_type: 'COMPANY',
+  counterparty_company_id: '',
+  currency: 'USD',
+  billing_basis: 'TIMESHEET',
+  billing_frequency: 'MONTHLY',
+  start_date: '',
+  end_date: '',
+}
+
+function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }) {
+  const router = useRouter()
+  const { activeCompanyPublicId, can } = useCompany()
+  const [open, setOpen] = React.useState(false)
+  const [values, setValues] = React.useState<SowFormValues>(EMPTY_SOW)
+  const [errors, setErrors] = React.useState<Partial<Record<string, string>>>({})
+  const [projects, setProjects] = React.useState<Project[]>([])
+
+  React.useEffect(() => {
+    if (!open) return
+    setValues(EMPTY_SOW)
+    setErrors({})
+    void api
+      .get<PageEnvelope<Project>>('/projects?limit=100', {
+        companyPublicId: activeCompanyPublicId,
+      })
+      .then((page) => setProjects(page.data ?? []))
+      .catch(() => setProjects([]))
+  }, [open, activeCompanyPublicId])
+
+  const create = useCompanyMutation<Sow, SowFormValues>({
+    context: { companyPublicId: activeCompanyPublicId },
+    mutationFn: (form) =>
+      api.post<Sow>(
+        `/sows?project_id=${encodeURIComponent(form.project_id)}`,
+        {
+          title: form.title,
+          description: form.description?.trim() || undefined,
+          sow_type: form.sow_type,
+          counterparty_company_id: form.counterparty_company_id?.trim() || undefined,
+          currency: form.currency,
+          billing_basis: form.billing_basis,
+          billing_frequency: form.billing_frequency,
+          start_date: form.start_date || undefined,
+          end_date: form.end_date || undefined,
+        },
+        { companyPublicId: activeCompanyPublicId },
+      ),
+    invalidate: [['sows']],
+    onSuccess: (sow) => {
+      notifySuccess('SOW created.', `${sow.title} · ${sow.public_id}`)
+      setOpen(false)
+      router.push(`/sows/${sow.public_id}`)
+    },
+  })
+
+  const set = <K extends keyof SowFormValues>(key: K, value: SowFormValues[K]) =>
+    setValues((previous) => ({ ...previous, [key]: value }))
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    const parsed = sowSchema.safeParse(values)
+    if (!parsed.success) {
+      const next: Partial<Record<string, string>> = {}
+      for (const issue of parsed.error.issues) {
+        const key = String(issue.path[0] ?? '')
+        if (key && !next[key]) next[key] = issue.message
+      }
+      setErrors(next)
+      return
+    }
+    setErrors({})
+    try {
+      await create.mutateAsync(parsed.data)
+    } catch (cause) {
+      notifyError(cause, 'The SOW could not be created.')
+    }
+  }
+
+  if (!can('sows.create')) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        You do not have permission to create statements of work in this company.
+      </p>
+    )
+  }
+
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>
+        <Plus aria-hidden />
+        {triggerLabel}
+      </Button>
+
+      <Dialog
+        open={open}
+        onOpenChange={setOpen}
+        title="New statement of work"
+        description="A SOW allocates project roles to a counterparty. Contracts are generated from an approved SOW."
+        className="max-w-2xl"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
+              Cancel
+            </Button>
+            <Button type="submit" form="create-sow" loading={create.isPending}>
+              Create SOW
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="create-sow"
+          onSubmit={submit}
+          className="max-h-[65vh] space-y-4 overflow-y-auto pr-1"
+        >
+          <Field label="Project" error={errors.project_id} required>
+            <Select
+              id="sow-project"
+              value={values.project_id}
+              onChange={(event) => set('project_id', event.target.value)}
+              aria-invalid={Boolean(errors.project_id)}
+            >
+              <option value="">Choose a project…</option>
+              {projects.map((project) => (
+                <option key={project.public_id} value={project.public_id}>
+                  {project.name} · {project.public_id}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <Field label="Title" error={errors.title} required>
+            <Input
+              id="sow-title"
+              value={values.title}
+              onChange={(event) => set('title', event.target.value)}
+              aria-invalid={Boolean(errors.title)}
+              placeholder="Backend team augmentation"
+            />
+          </Field>
+
+          <FieldGrid>
+            <Field label="Type">
+              <Select
+                id="sow-type"
+                value={values.sow_type}
+                onChange={(event) => set('sow_type', event.target.value as SowFormValues['sow_type'])}
+              >
+                <option value="COMPANY">Company</option>
+                <option value="INDIVIDUAL">Individual</option>
+              </Select>
+            </Field>
+            <Field label="Counterparty company ID" error={errors.counterparty_company_id}>
+              <Input
+                id="sow-counterparty"
+                value={values.counterparty_company_id ?? ''}
+                onChange={(event) => set('counterparty_company_id', event.target.value)}
+                placeholder="CO… (optional)"
+              />
+            </Field>
+          </FieldGrid>
+
+          <FieldGrid>
+            <Field label="Currency">
+              <CurrencySelect
+                id="sow-currency"
+                value={values.currency}
+                onChange={(value) => set('currency', value)}
+              />
+            </Field>
+            <Field label="Billing basis">
+              <Select
+                id="sow-basis"
+                value={values.billing_basis}
+                onChange={(event) => set('billing_basis', event.target.value as SowFormValues['billing_basis'])}
+              >
+                {BILLING_BASES.map((basis) => (
+                  <option key={basis} value={basis}>
+                    {statusLabel(basis)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Billing frequency">
+              <Select
+                id="sow-frequency"
+                value={values.billing_frequency}
+                onChange={(event) =>
+                  set('billing_frequency', event.target.value as SowFormValues['billing_frequency'])
+                }
+              >
+                {BILLING_FREQUENCIES.map((frequency) => (
+                  <option key={frequency} value={frequency}>
+                    {statusLabel(frequency)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </FieldGrid>
+
+          <FieldGrid>
+            <Field label="Start date" error={errors.start_date}>
+              <DateInput
+                id="sow-start"
+                value={values.start_date ?? ''}
+                onChange={(value) => set('start_date', value)}
+              />
+            </Field>
+            <Field label="End date" error={errors.end_date}>
+              <DateInput
+                id="sow-end"
+                value={values.end_date ?? ''}
+                onChange={(value) => set('end_date', value)}
+              />
+            </Field>
+          </FieldGrid>
+        </form>
+      </Dialog>
+    </>
   )
 }

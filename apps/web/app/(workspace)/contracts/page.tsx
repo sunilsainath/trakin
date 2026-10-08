@@ -2,12 +2,26 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { FileText } from 'lucide-react'
+import { useRouter } from 'next/navigation'
+import { z } from 'zod'
+import { FileText, Plus } from 'lucide-react'
 
+import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
+import { useCompanyMutation } from '@/hooks/use-mutations'
 import { formatCurrency, formatDate } from '@/lib/utils'
-import { CONTRACT_STATUSES, type Contract, type Page as PageEnvelope } from '@/lib/domain-types'
-import { Button, EmptyState } from '@/components/ui'
+import { statusLabel } from '@/lib/status'
+import {
+  BILLING_BASES,
+  BILLING_FREQUENCIES,
+  CONTRACT_STATUSES,
+  type Contract,
+  type Page as PageEnvelope,
+  type Sow,
+} from '@/lib/domain-types'
+import { Button, Dialog, EmptyState, Input, Select } from '@/components/ui'
+import { CurrencySelect, DateInput, Field, FieldGrid } from '@/components/forms'
+import { notifyError, notifySuccess } from '@/components/toast'
 import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
 import { PublicId } from '@/components/public-id'
@@ -121,6 +135,7 @@ export default function ContractsPage() {
           crumbs={[{ label: 'Contracts' }]}
           title="Contracts"
           description="What has been agreed, with whom, and where each one stands. The action buttons on a contract come from the transitions the server will accept."
+          actions={<CreateContractDialog />}
         />
 
         <FilterBar
@@ -207,9 +222,7 @@ export default function ContractsPage() {
                         Clear filters
                       </Button>
                     ) : (
-                      <Link href="/sows">
-                        <Button>Open statements of work</Button>
-                      </Link>
+                      <CreateContractDialog triggerLabel="Create the first contract" />
                     )
                   }
                 />
@@ -229,5 +242,259 @@ export default function ContractsPage() {
         )}
       </div>
     </PageShell>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Create contract                                                              */
+/* -------------------------------------------------------------------------- */
+
+const contractSchema = z
+  .object({
+    sow_id: z.string().min(1, 'Choose the SOW this contract belongs to.'),
+    title: z.string().trim().min(2, 'Give the contract a title.').max(200),
+    contract_type: z.enum(['COMPANY', 'INDIVIDUAL']),
+    counterparty_company_id: z.string().trim().optional(),
+    currency: z.string().length(3),
+    billing_basis: z.enum(['TIMESHEET', 'FIXED', 'RECURRING', 'USAGE', 'MILESTONE']),
+    billing_frequency: z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'CUSTOM']),
+    start_date: z.string().optional(),
+    end_date: z.string().optional(),
+  })
+  .refine((values) => !values.start_date || !values.end_date || values.end_date >= values.start_date, {
+    message: 'The end date cannot be before the start date.',
+    path: ['end_date'],
+  })
+
+type ContractFormValues = z.infer<typeof contractSchema>
+
+const EMPTY_CONTRACT: ContractFormValues = {
+  sow_id: '',
+  title: '',
+  contract_type: 'COMPANY',
+  counterparty_company_id: '',
+  currency: 'USD',
+  billing_basis: 'TIMESHEET',
+  billing_frequency: 'MONTHLY',
+  start_date: '',
+  end_date: '',
+}
+
+function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?: string }) {
+  const router = useRouter()
+  const { activeCompanyPublicId, can } = useCompany()
+  const [open, setOpen] = React.useState(false)
+  const [values, setValues] = React.useState<ContractFormValues>(EMPTY_CONTRACT)
+  const [errors, setErrors] = React.useState<Partial<Record<string, string>>>({})
+  const [sows, setSows] = React.useState<Sow[]>([])
+
+  React.useEffect(() => {
+    if (!open) return
+    setValues(EMPTY_CONTRACT)
+    setErrors({})
+    void api
+      .get<PageEnvelope<Sow>>('/sows?limit=100', { companyPublicId: activeCompanyPublicId })
+      .then((page) => setSows(page.data ?? []))
+      .catch(() => setSows([]))
+  }, [open, activeCompanyPublicId])
+
+  const create = useCompanyMutation<Contract, ContractFormValues>({
+    context: { companyPublicId: activeCompanyPublicId },
+    mutationFn: (form) => {
+      const sow = sows.find((s) => s.public_id === form.sow_id)
+      if (!sow) throw new Error('Choose a SOW first.')
+      return api.post<Contract>(
+        '/contracts',
+        {
+          project_id: sow.project_id,
+          sow_id: form.sow_id,
+          title: form.title,
+          contract_type: form.contract_type,
+          counterparty_company_id: form.counterparty_company_id?.trim() || undefined,
+          currency: form.currency,
+          billing_basis: form.billing_basis,
+          billing_frequency: form.billing_frequency,
+          start_date: form.start_date || undefined,
+          end_date: form.end_date || undefined,
+        },
+        { companyPublicId: activeCompanyPublicId },
+      )
+    },
+    invalidate: [['contracts']],
+    onSuccess: (contract) => {
+      notifySuccess('Contract created.', `${contract.title} · ${contract.public_id}`)
+      setOpen(false)
+      router.push(`/contracts/${contract.public_id}`)
+    },
+  })
+
+  const set = <K extends keyof ContractFormValues>(key: K, value: ContractFormValues[K]) =>
+    setValues((previous) => ({ ...previous, [key]: value }))
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    const parsed = contractSchema.safeParse(values)
+    if (!parsed.success) {
+      const next: Partial<Record<string, string>> = {}
+      for (const issue of parsed.error.issues) {
+        const key = String(issue.path[0] ?? '')
+        if (key && !next[key]) next[key] = issue.message
+      }
+      setErrors(next)
+      return
+    }
+    setErrors({})
+    try {
+      await create.mutateAsync(parsed.data)
+    } catch (cause) {
+      notifyError(cause, 'The contract could not be created.')
+    }
+  }
+
+  if (!can('contracts.create')) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        You do not have permission to create contracts in this company.
+      </p>
+    )
+  }
+
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>
+        <Plus aria-hidden />
+        {triggerLabel}
+      </Button>
+
+      <Dialog
+        open={open}
+        onOpenChange={setOpen}
+        title="New contract"
+        description="A contract references a project and its SOW. The project is taken from the chosen SOW."
+        className="max-w-2xl"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
+              Cancel
+            </Button>
+            <Button type="submit" form="create-contract" loading={create.isPending}>
+              Create contract
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="create-contract"
+          onSubmit={submit}
+          className="max-h-[65vh] space-y-4 overflow-y-auto pr-1"
+        >
+          <Field label="SOW" error={errors.sow_id} required>
+            <Select
+              id="contract-sow"
+              value={values.sow_id}
+              onChange={(event) => set('sow_id', event.target.value)}
+              aria-invalid={Boolean(errors.sow_id)}
+            >
+              <option value="">Choose a SOW…</option>
+              {sows.map((sow) => (
+                <option key={sow.public_id} value={sow.public_id}>
+                  {sow.title} · {sow.public_id}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <Field label="Title" error={errors.title} required>
+            <Input
+              id="contract-title"
+              value={values.title}
+              onChange={(event) => set('title', event.target.value)}
+              aria-invalid={Boolean(errors.title)}
+              placeholder="Backend team contract"
+            />
+          </Field>
+
+          <FieldGrid>
+            <Field label="Type">
+              <Select
+                id="contract-type"
+                value={values.contract_type}
+                onChange={(event) =>
+                  set('contract_type', event.target.value as ContractFormValues['contract_type'])
+                }
+              >
+                <option value="COMPANY">Company</option>
+                <option value="INDIVIDUAL">Individual</option>
+              </Select>
+            </Field>
+            <Field label="Counterparty company ID" error={errors.counterparty_company_id}>
+              <Input
+                id="contract-counterparty"
+                value={values.counterparty_company_id ?? ''}
+                onChange={(event) => set('counterparty_company_id', event.target.value)}
+                placeholder="CO… (optional)"
+              />
+            </Field>
+          </FieldGrid>
+
+          <FieldGrid>
+            <Field label="Currency">
+              <CurrencySelect
+                id="contract-currency"
+                value={values.currency}
+                onChange={(value) => set('currency', value)}
+              />
+            </Field>
+            <Field label="Billing basis">
+              <Select
+                id="contract-basis"
+                value={values.billing_basis}
+                onChange={(event) =>
+                  set('billing_basis', event.target.value as ContractFormValues['billing_basis'])
+                }
+              >
+                {BILLING_BASES.map((basis) => (
+                  <option key={basis} value={basis}>
+                    {statusLabel(basis)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Billing frequency">
+              <Select
+                id="contract-frequency"
+                value={values.billing_frequency}
+                onChange={(event) =>
+                  set('billing_frequency', event.target.value as ContractFormValues['billing_frequency'])
+                }
+              >
+                {BILLING_FREQUENCIES.map((frequency) => (
+                  <option key={frequency} value={frequency}>
+                    {statusLabel(frequency)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </FieldGrid>
+
+          <FieldGrid>
+            <Field label="Start date" error={errors.start_date}>
+              <DateInput
+                id="contract-start"
+                value={values.start_date ?? ''}
+                onChange={(value) => set('start_date', value)}
+              />
+            </Field>
+            <Field label="End date" error={errors.end_date}>
+              <DateInput
+                id="contract-end"
+                value={values.end_date ?? ''}
+                onChange={(value) => set('end_date', value)}
+              />
+            </Field>
+          </FieldGrid>
+        </form>
+      </Dialog>
+    </>
   )
 }
