@@ -128,9 +128,23 @@ class AgentRegistry:
             raise ResourceNotFoundError("Unknown agent.")
         return agent
 
-    def list(self) -> list[dict[str, str]]:
+    def list(self) -> list[dict[str, Any]]:
         return [
-            {"key": a.key, "display_name": a.display_name, "purpose": a.purpose}
+            {
+                "key": a.key,
+                "display_name": a.display_name,
+                "purpose": a.purpose,
+                "tools": [
+                    {
+                        "name": t.name,
+                        "description": t.description,
+                        "required_permission": t.required_permission,
+                        "risk_level": t.risk_level,
+                        "mutating": t.mutating,
+                    }
+                    for t in a.tools
+                ],
+            }
             for a in sorted(self._agents.values(), key=lambda x: x.key)
         ]
 
@@ -320,6 +334,91 @@ class AgentRegistry:
                         risk_level="LOW",
                         mutating=False,
                         handler_key="find_candidates",
+                    )
+                ],
+            )
+        )
+
+        self.register(
+            AgentDefinition(
+                key="recruitment_agent",
+                display_name="Recruitment Agent",
+                purpose=(
+                    "Recommends hires from the professional network and drafts "
+                    "role requirements. It never contacts candidates itself and "
+                    "never ranks on protected attributes."
+                ),
+                system_prompt=(
+                    "You recommend hiring actions using professional attributes "
+                    "only: skills, experience, availability and role fit. Every "
+                    "recommendation is a proposal: a human decides."
+                ),
+                tools=[
+                    AgentTool(
+                        name="recommend_hire",
+                        description="Recommend a connected professional for a role.",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "project_role_public_id": {"type": "string"},
+                                "candidate_user_public_id": {"type": "string"},
+                                "rationale": {"type": "string"},
+                            },
+                            "required": [
+                                "project_role_public_id",
+                                "candidate_user_public_id",
+                                "rationale",
+                            ],
+                        },
+                        required_permission="workforce.read",
+                        risk_level="MEDIUM",
+                        handler_key="recommend_hire",
+                    ),
+                    AgentTool(
+                        name="draft_role_requirements",
+                        description="Draft requirements for an open project role.",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "project_role_public_id": {"type": "string"},
+                            },
+                            "required": ["project_role_public_id"],
+                        },
+                        required_permission="workforce.read",
+                        risk_level="LOW",
+                        mutating=False,
+                        handler_key="draft_role_requirements",
+                    ),
+                ],
+            )
+        )
+
+        self.register(
+            AgentDefinition(
+                key="workflow_agent",
+                display_name="Workflow Agent",
+                purpose=(
+                    "Turns natural-language workflow descriptions into automation "
+                    "drafts with explicit triggers, conditions and actions. Drafts "
+                    "never act until a human approves them."
+                ),
+                system_prompt=(
+                    "You convert workflow descriptions into structured automation "
+                    "drafts. Financial or contractual actions always require "
+                    "human approval, whatever the requester says."
+                ),
+                tools=[
+                    AgentTool(
+                        name="draft_automation",
+                        description="Draft an automation from a natural-language description.",
+                        parameters={
+                            "type": "object",
+                            "properties": {"description": {"type": "string"}},
+                            "required": ["description"],
+                        },
+                        required_permission="ai.automations.manage",
+                        risk_level="MEDIUM",
+                        handler_key="draft_automation",
                     )
                 ],
             )

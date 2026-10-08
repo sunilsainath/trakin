@@ -24,6 +24,7 @@ from app.ai import rag
 from app.ai.gateway import ChatRequest, get_gateway
 from app.api.deps import (
     RequestContext,
+    company_scope,
     require_company_member,
     require_permission,
 )
@@ -336,3 +337,39 @@ async def usage(
 
     usage: dict[str, Any] = dict(row or {})
     return {"period": "today", **usage}
+
+
+@router.get("/briefing", summary="Personalized daily briefing")
+async def briefing(ctx_and_conn: Context) -> dict[str, Any]:
+    """What needs attention: expiring contracts, overdue invoices, pending
+    timesheets and MSA requests — each section gated on its own permission."""
+    from app.services import ai_domain as briefing_service
+
+    ctx, conn = ctx_and_conn
+    result = await briefing_service.daily_briefing(
+        conn, company_id=company_scope(ctx), permissions=ctx.permissions
+    )
+    return {**result, "request_id": ctx.request_id}
+
+
+@router.post("/automations/draft", summary="Draft an automation from words")
+async def draft_automation(
+    ctx_and_conn: Annotated[
+        tuple[RequestContext, AsyncConnection],
+        Depends(require_permission("ai.automations.manage")),
+    ],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Compile a description into an inactive draft. Deterministic, never
+    generative: unrecognized parts come back as `unparsed` for the human."""
+    from app.services import automation_builder
+
+    ctx, conn = ctx_and_conn
+    return await automation_builder.draft_automation(
+        conn,
+        company_id=company_scope(ctx),
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        description=str(payload.get("description") or ""),
+        name=payload.get("name"),
+    )

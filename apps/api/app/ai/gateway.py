@@ -329,6 +329,12 @@ class ProviderRegistry:
 
 
 # ---------------------------------------------------------------------- gateway
+# Identical prompts are common (daily briefings, repeated questions); a short
+# process-local TTL absorbs them without any cross-tenant risk.
+_CACHE_TTL_SECONDS = 15 * 60
+_CACHE_MAX_ENTRIES = 500
+
+
 class AIGateway:
     """The single entry point for model access.
 
@@ -339,13 +345,61 @@ class AIGateway:
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self.registry = ProviderRegistry(self._settings)
+        # Process-local TTL cache. The key always includes company and user, so
+        # a cached answer can never cross a tenant or identity boundary. It is
+        # deliberately not shared across workers: a miss only costs a call.
+        self._cache: dict[str, tuple[float, ChatResponse]] = {}
+
+    def _cache_key(self, request: ChatRequest) -> str:
+        import hashlib as _hashlib
+        import json as _json
+
+        material = _json.dumps(
+            {
+                "company": str(request.company_id),
+                "user": str(request.user_id),
+                "model": request.model,
+                "temperature": request.temperature,
+                "feature": request.feature,
+                "messages": [
+                    {"role": m.role, "content": m.content, "name": m.name} for m in request.messages
+                ],
+                "context": [c.chunk_id for c in request.context],
+            },
+            sort_keys=True,
+        )
+        return _hashlib.sha256(material.encode()).hexdigest()
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
+        import time as _time
+
         if not self._settings.ai_gateway_enabled:
             raise IntegrationNotConfiguredError("ai")
 
         if request.company_id is not None and not await self._within_budget(request):
             raise AIBudgetExceededError()
+
+        key = self._cache_key(request)
+        hit = self._cache.get(key)
+        if hit is not None and _time.monotonic() - hit[0] < _CACHE_TTL_SECONDS:
+            cached = hit[1]
+            replay = ChatResponse(
+                content=cached.content,
+                provider_key=cached.provider_key,
+                model=cached.model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                cost_cents=0.0,
+                latency_ms=0,
+                citations=list(cached.citations),
+                tool_calls=[],
+                was_cached=True,
+                redacted=cached.redacted,
+            )
+            await self._record_usage(request, replay)
+            return replay
+        if hit is not None:
+            del self._cache[key]
 
         provider = self.registry.chat()
         try:
@@ -358,6 +412,12 @@ class AIGateway:
             logger.warning("ai_provider_fallback", from_=provider.key, to=fallback.key)
             response = await fallback.complete(request)
 
+        # Tool calls are never cached: replaying a proposed action could
+        # re-record intent outside the approval flow.
+        if response.content and not response.tool_calls:
+            if len(self._cache) >= _CACHE_MAX_ENTRIES:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[key] = (_time.monotonic(), response)
         await self._record_usage(request, response)
         return response
 

@@ -615,6 +615,7 @@ async def analyse_timesheet(
                 "severity": "HIGH",
                 "category": "POSSIBLE_DUPLICATE",
                 "explanation": (
+                    "Potential anomaly detected: "
                     f"{len(duplicates)} day/hours/description combination(s) appear more "
                     "than once; "
                     "these may be double-counted."
@@ -853,7 +854,8 @@ async def _history_findings(
                 "severity": "HIGH",
                 "code": "POSSIBLE_DUPLICATE_INVOICE",
                 "message": (
-                    "Another invoice covers the same counterparty, amount and period: "
+                    "Potential anomaly detected: another invoice covers the same "
+                    "counterparty, amount and period: "
                     + ", ".join(str(t["invoice_number"] or t["public_id"]) for t in twins)
                 ),
                 "blocking": True,
@@ -869,7 +871,8 @@ async def _history_findings(
                     "severity": "MEDIUM",
                     "code": "UNUSUAL_AMOUNT",
                     "message": (
-                        f"This amount is {ratio:.1f}x the average of {stats['average']} "
+                        "Potential anomaly detected: "
+                        f"this amount is {ratio:.1f}x the average of {stats['average']} "
                         "for this customer."
                     ),
                     "blocking": False,
@@ -1573,6 +1576,96 @@ async def workforce_overview(conn: AsyncConnection, *, company_id: uuid.UUID) ->
 
 
 # =============================================================================
+# daily briefing
+# =============================================================================
+async def daily_briefing(
+    conn: AsyncConnection, *, company_id: uuid.UUID, permissions: frozenset[str]
+) -> dict[str, Any]:
+    """Personalized attention list, assembled only from panels the caller may read.
+
+    Every section is permission-gated independently: a missing permission omits
+    the section rather than leaking a count.
+    """
+    sections: dict[str, Any] = {}
+
+    if "contracts.read" in permissions:
+        expiring = (
+            await conn.execute(
+                text(
+                    """
+                    SELECT public_id, title, end_date,
+                           (end_date - current_date) AS days_left
+                      FROM public.contracts
+                     WHERE company_id = :cid AND status = 'ACTIVE'
+                       AND end_date IS NOT NULL
+                       AND end_date <= current_date + interval '30 days'
+                     ORDER BY end_date ASC
+                     LIMIT 10
+                    """
+                ),
+                {"cid": company_id},
+            )
+        ).mappings()
+        sections["contracts_expiring"] = [dict(r) for r in expiring.all()]
+
+    if "invoices.read" in permissions:
+        overdue = (
+            await conn.execute(
+                text(
+                    """
+                    SELECT public_id, invoice_number, balance_due, due_date,
+                           (current_date - due_date) AS days_overdue
+                      FROM public.invoices
+                     WHERE company_id = :cid AND direction = 'RECEIVABLE'
+                       AND balance_due > 0 AND due_date < current_date
+                       AND status NOT IN ('CANCELLED','REJECTED','REFUNDED','PAID')
+                       AND deleted_at IS NULL
+                     ORDER BY due_date ASC
+                     LIMIT 10
+                    """
+                ),
+                {"cid": company_id},
+            )
+        ).mappings()
+        sections["invoices_overdue"] = [dict(r) for r in overdue.all()]
+
+    if "timesheets.read_any" in permissions:
+        pending = (
+            await conn.execute(
+                text(
+                    """
+                    SELECT count(*) AS submitted, count(*) FILTER (
+                      WHERE status = 'UNDER_REVIEW') AS under_review
+                      FROM public.timesheets
+                     WHERE company_id = :cid AND status IN ('SUBMITTED','UNDER_REVIEW')
+                    """
+                ),
+                {"cid": company_id},
+            )
+        ).mappings()
+        sections["timesheets_pending"] = dict(pending.first() or {})
+
+    if "msas.read" in permissions:
+        requests = (
+            await conn.execute(
+                text(
+                    """
+                    SELECT id::text AS id, status, created_at AS requested_at
+                      FROM public.msa_requests
+                     WHERE target_company_id = :cid AND status = 'PENDING'
+                     ORDER BY created_at DESC
+                     LIMIT 10
+                    """
+                ),
+                {"cid": company_id},
+            )
+        ).mappings()
+        sections["msa_requests"] = [dict(r) for r in requests.all()]
+
+    return {"sections": sections}
+
+
+# =============================================================================
 # agent surface
 # =============================================================================
 def available_agents() -> list[dict[str, Any]]:
@@ -1583,19 +1676,12 @@ def available_agents() -> list[dict[str, Any]]:
     """
     agents: Any = get_agents().list()
 
-    _raise: Any = object()
-
-    def _get(item: Any, name: str, default: Any = _raise) -> Any:
-        # The registry yields plain dicts; attribute access keeps working if it
-        # ever yields objects instead.
+    def _get(item: Any, name: str, default: Any = None) -> Any:
+        # The registry yields plain dicts with a tools list; tolerate entries
+        # without tools so one catalogue gap cannot fail the whole listing.
         if isinstance(item, dict):
-            if name in item:
-                return item[name]
-        elif hasattr(item, name):
-            return getattr(item, name)
-        if default is _raise:
-            raise KeyError(name)
-        return default
+            return item.get(name, default)
+        return getattr(item, name, default)
 
     catalogue: list[dict[str, Any]] = [
         {
@@ -1610,8 +1696,6 @@ def available_agents() -> list[dict[str, Any]]:
                     "risk_level": _get(tool, "risk_level"),
                     "mutating": _get(tool, "mutating"),
                 }
-                # A catalogue entry without tools is valid (no capabilities
-                # to offer); it must not fail the whole listing.
                 for tool in _get(agent, "tools", [])
             ],
         }
