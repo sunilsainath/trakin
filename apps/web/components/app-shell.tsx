@@ -59,15 +59,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setMobileOpen(false)
   }, [pathname])
 
-  // The theme must be resolved before first paint to avoid a flash.
+  // Light-first enterprise theme: the spec forbids black-heavy UI, so the OS
+  // dark preference is never followed automatically. Users can still toggle
+  // dark manually; the stored choice wins on every load.
   React.useEffect(() => {
     const stored = window.localStorage.getItem('mytrakin.theme')
-    const preferred =
-      stored === 'dark' || stored === 'light'
-        ? stored
-        : window.matchMedia('(prefers-color-scheme: dark)').matches
-          ? 'dark'
-          : 'light'
+    const preferred = stored === 'dark' || stored === 'light' ? stored : 'light'
     setTheme(preferred)
     document.documentElement.classList.toggle('dark', preferred === 'dark')
   }, [])
@@ -86,8 +83,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-dvh bg-background">
-      {/* Skip link target */}
-      <div id="main" className="flex-1">
+      {/* Skip link target. Row layout: the rail sits left, the column right.
+        Without `flex` here the rail stacks above the content on desktop. */}
+      <div id="main" className="flex min-w-0 flex-1">
         {/* ------------------------------------------------------------ */}
         {/* Left rail                                                      */}
         {/* ------------------------------------------------------------ */}
