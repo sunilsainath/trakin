@@ -181,6 +181,19 @@ export default function OnboardingPage() {
               onSubmit={createCompany}
               banner={null}
             />
+            <div className="border-t border-border pt-3 text-center">
+              <p className="text-xs text-muted-foreground">
+                Not a company owner? Employees join through an invitation — no company
+                creation needed.
+              </p>
+              <Button
+                variant="ghost"
+                className="mt-1 w-full"
+                onClick={() => setStep(2)}
+              >
+                Skip for now
+              </Button>
+            </div>
           </div>
         ) : null}
 

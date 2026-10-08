@@ -67,21 +67,27 @@ function WorkspaceGate({ children }: { children: React.ReactNode }) {
     )
   }
 
-  // A signed-in user with no membership cannot use the workspace at all.
+  // Onboarding is unfinished: send the user there instead of into the app.
+  // Company membership is never forced: without one the user can still enter
+  // the feed, and every company-scoped screen explains its own context need.
+  // (There is deliberately no dead-end here and no /companies/new or
+  // /invitations route to maintain: joining happens through onboarding or a
+  // direct invitation link.)
   if (companies.length === 0 || !activeCompany) {
+    if (pathname === '/feed') {
+      return <AppShell>{children}</AppShell>
+    }
     return (
       <div className="flex min-h-dvh items-center justify-center bg-background p-6">
         <Card className="max-w-md p-6 text-center">
           <h1 className="text-base font-semibold">You are not part of a company yet</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            Create a company to start working, or ask a colleague to invite you.
+            Not a company owner? No problem — the feed is open to you now, and
+            most workspace screens unlock once you belong to a company.
           </p>
-          <div className="mt-4 flex justify-center gap-2">
+          <div className="mt-4 flex justify-center">
             <Button asChild>
-              <a href="/companies/new">Create a company</a>
-            </Button>
-            <Button variant="outline" asChild>
-              <a href="/invitations">I have an invitation</a>
+              <a href="/feed">Continue to feed</a>
             </Button>
           </div>
         </Card>

@@ -82,7 +82,7 @@ export function ProfessionalFeed({
     return (
       <EmptyState
         title="Select a company to continue"
-        description="Your feed loads in a company context. Pick one in the header to see your network's posts."
+        description="Posts load in a company context. Once you belong to one, pick it in the header to see your network's posts."
       />
     )
   }

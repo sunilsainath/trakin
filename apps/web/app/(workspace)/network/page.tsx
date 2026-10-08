@@ -63,7 +63,7 @@ export default function NetworkPage() {
         <PageHeader title="Network" description="Posts and professional connections." />
         <EmptyState
           title="Select a company to continue"
-          description="Your network loads in a company context. Pick one in the header to see posts and connections."
+          description="Your network loads in a company context. Once you belong to one, pick it in the header to see posts and connections."
         />
       </PageShell>
     )

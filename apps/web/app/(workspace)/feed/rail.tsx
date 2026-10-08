@@ -76,7 +76,7 @@ export function RightRail({ companyPublicId }: { companyPublicId: string | null 
     return (
       <EmptyState
         title="Select a company to continue"
-        description="Suggestions load in a company context. Pick one in the header to meet your network."
+        description="Suggestions load in a company context. Once you belong to one, pick it in the header to meet your network."
       />
     )
   }
