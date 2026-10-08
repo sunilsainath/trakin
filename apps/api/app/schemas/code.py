@@ -1,4 +1,4 @@
-"""CODE module contracts: projects, project roles, SOWs and contracts.
+"""CORE module contracts: projects, project roles, SOWs and contracts.
 
 Request bodies are strict (`extra="forbid"`) so a typo in a commercial term is
 rejected rather than silently ignored. Responses are explicit projections — no

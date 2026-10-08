@@ -1,4 +1,4 @@
-"""CODE module: projects, project roles, SOWs, contracts and contract roles.
+"""CORE module: projects, project roles, SOWs, contracts and contract roles.
 
 Business rules that matter, and where each one is enforced:
 

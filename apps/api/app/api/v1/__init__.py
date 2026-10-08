@@ -62,7 +62,7 @@ api_router.include_router(auth_module.router)
 api_router.include_router(identity_module.router)
 api_router.include_router(companies_module.router)
 
-# CODE: projects -> roles -> SOW -> contract -> contract roles
+# CORE: projects -> roles -> SOW -> contract -> contract roles
 api_router.include_router(code_module.router)
 
 # WORK: assignments, timesheets, leave
