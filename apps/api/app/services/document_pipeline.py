@@ -56,7 +56,7 @@ def _classify(file_name: str, mime_type: str) -> str:
 
 
 async def enqueue_processing(
-    conn: AsyncConnection, *, version_id: uuid.UUID, company_id: uuid.UUID
+    conn: AsyncConnection, *, version_id: uuid.UUID, company_id: uuid.UUID | None
 ) -> None:
     """Durable enqueue: the outbox row is the queue, so no broker means delay, not loss."""
     await conn.execute(

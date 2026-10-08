@@ -17,7 +17,7 @@ from app.schemas.identity import (
     UpdateMeRequest,
     UserProfileResponse,
 )
-from app.services import identity
+from app.services import audit, identity
 
 router = APIRouter(prefix="/users", tags=["identity"])
 
@@ -64,6 +64,53 @@ async def set_privacy(
         request_id=ctx.request_id,
     )
     return AckResponse(ok=True, message="Privacy settings saved.", request_id=ctx.request_id)
+
+
+@router.post("/me/onboarding", summary="Complete onboarding")
+async def complete_onboarding(ctx_and_conn: UserContext) -> dict[str, Any]:
+    """Mark onboarding complete once the profile has a name.
+
+    The workspace gate sends users here until this is set; the frontend calls
+    it from the final onboarding step. Requires a real name so company member
+    lists never show blanks.
+    """
+    ctx, conn = ctx_and_conn
+    row = (
+        (
+            await conn.execute(
+                text(
+                    "SELECT first_name, last_name, onboarding_completed_at"
+                    " FROM public.users WHERE id = :uid"
+                ),
+                {"uid": ctx.user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if not row or not (row["first_name"] or "").strip() or not (row["last_name"] or "").strip():
+        from app.core.errors import ValidationError
+
+        raise ValidationError(
+            "Add your first and last name before finishing onboarding.",
+            details={"reason": "PROFILE_INCOMPLETE"},
+        )
+    await conn.execute(
+        text(
+            "UPDATE public.users SET onboarding_completed_at = COALESCE("
+            "onboarding_completed_at, now()) WHERE id = :uid"
+        ),
+        {"uid": ctx.user_id},
+    )
+    await audit.record(
+        conn,
+        action="profile.onboarding_completed",
+        resource_type="user",
+        resource_id=ctx.user_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+    )
+    return await identity.get_me(conn, ctx.user_id)
 
 
 @router.get(

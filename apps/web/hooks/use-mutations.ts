@@ -166,3 +166,52 @@ export async function uploadDocument({
 
   return (await response.json()) as { public_id: string }
 }
+
+/**
+ * Upload a founding W-9 before any company exists.
+ *
+ * Like `uploadDocument` but without a company header: founders have no company
+ * yet by definition. Auth and error handling are identical.
+ */
+export async function uploadFoundingW9(file: File): Promise<{ public_id: string }> {
+  const { getAccessToken, ApiError: ApiErrorClass } = await import('@/lib/api')
+
+  const form = new FormData()
+  form.append('file', file)
+
+  const headers: Record<string, string> = {}
+  const token = await getAccessToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000'
+  const response = await fetch(`${base}/api/v1/companies/w9-upload`, {
+    method: 'POST',
+    headers,
+    body: form,
+    cache: 'no-store',
+  })
+
+  if (!response.ok) {
+    let code = 'INTERNAL_ERROR'
+    let message = 'That upload did not work.'
+    let requestId = response.headers.get('x-request-id')
+    try {
+      const payload = (await response.json()) as {
+        error?: { code?: string; message?: string; request_id?: string }
+      }
+      code = payload.error?.code ?? code
+      message = payload.error?.message ?? message
+      requestId = payload.error?.request_id ?? requestId
+    } catch {
+      // A non-JSON error body keeps the defaults.
+    }
+    throw new ApiErrorClass(
+      code as never,
+      message,
+      response.status,
+      requestId,
+    )
+  }
+
+  return (await response.json()) as { public_id: string }
+}

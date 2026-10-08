@@ -125,11 +125,125 @@ def _sniff(head: bytes) -> str | None:
     return None
 
 
+# W-9s arrive as scans: PDF or image. Anything else is rejected before the
+# intake row exists, so a company can never be founded on a wrong file type.
+W9_ALLOWED_MIME = frozenset(
+    {"application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp", "image/tiff"}
+)
+
+
+async def upload_w9_intake(
+    conn: AsyncConnection,
+    *,
+    founder_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    file_name: str,
+    content: bytes,
+    content_type: str,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Store a founder's W-9 before their company exists.
+
+    The row is company-less (`company_id IS NULL`) and PRIVATE to the owner,
+    so it is invisible to every tenant query; `create_company` claims it into
+    the new company in the same transaction that founds it. The version is
+    enqueued for scan/extract like any other upload.
+    """
+    from app.services import document_pipeline
+
+    declared = (content_type or "").split(";")[0].strip().lower()
+    if declared not in W9_ALLOWED_MIME:
+        raise UnsupportedMediaTypeError(
+            "A W-9 must be a PDF or an image scan.",
+            details={"content_type": declared, "allowed": sorted(W9_ALLOWED_MIME)},
+        )
+    validate_upload(
+        filename=file_name,
+        content_type=content_type,
+        size=len(content),
+        max_bytes=max_bytes,
+        first_bytes=content[:16],
+    )
+    checksum = hashlib.sha256(content).hexdigest()
+
+    client, bucket = await _storage()
+    if client is None or bucket is None:
+        raise BusinessRuleViolationError(
+            "Document storage is not configured for this environment.",
+            details={"reason": "STORAGE_NOT_CONFIGURED"},
+        )
+    storage_bucket = bucket
+    storage_path = f"w9-intake/{founder_user_id}/{uuid.uuid4()}/{file_name or 'w9.pdf'}"
+    await client.storage.from_(bucket).upload(
+        storage_path, content, {"content-type": content_type, "upsert": "false"}
+    )
+
+    created = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.documents
+                      (company_id, owner_user_id, doc_type, title, description,
+                       visibility, status, checksum_sha256)
+                    VALUES (NULL, :actor, 'W9', :title, 'W-9 intake for company founding',
+                            'PRIVATE', 'PROCESSING', :checksum)
+                    RETURNING id, public_id
+                    """
+                ),
+                {"actor": founder_user_id, "title": file_name or "W-9", "checksum": checksum},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    public_id, document_id = str(created["public_id"]), created["id"]
+    version_id = (
+        await conn.execute(
+            text(
+                """
+                INSERT INTO public.document_versions
+                  (document_id, version_no, storage_bucket, file_name, mime_type,
+                   byte_size, storage_path, checksum_sha256, uploaded_by)
+                VALUES (CAST(:did AS uuid), 1, :bucket, :file_name, :content_type, :size,
+                        :storage_path, :checksum, :actor)
+                RETURNING id
+                """
+            ),
+            {
+                "did": document_id,
+                "bucket": storage_bucket,
+                "file_name": file_name or "w9.pdf",
+                "content_type": declared,
+                "size": len(content),
+                "storage_path": storage_path,
+                "checksum": checksum,
+                "actor": founder_user_id,
+            },
+        )
+    ).scalar_one()
+    await document_pipeline.enqueue_processing(conn, version_id=version_id, company_id=None)
+    await audit.record(
+        conn,
+        action="document.w9_intake_uploaded",
+        resource_type="document",
+        resource_id=document_id,
+        resource_public_id=str(public_id),
+        actor_user_id=founder_user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return {"public_id": str(public_id), "status": "PROCESSING", "request_id": request_id}
+
+
 async def _storage() -> tuple[Any, str | None]:
     """The Supabase storage client, built lazily.
 
     Returns None when the storage adapter is not configured; the caller reports
-    that honestly rather than pretending the file was stored.
+    that honestly rather than pretending the file was stored. The private
+    documents bucket is created on first use (idempotent): uploads must not
+    depend on dashboard click-ops.
     """
     from app.core.config import get_settings
 
@@ -139,9 +253,22 @@ async def _storage() -> tuple[Any, str | None]:
     if not url or not key.get_secret_value():
         return None, None
 
-    from supabase import create_client  # type: ignore[import-not-found]
+    # Async client: every storage call in this module is awaited.
+    from supabase import create_async_client
 
-    return create_client(url, key.get_secret_value()), settings.storage_bucket_documents
+    client = await create_async_client(url, key.get_secret_value())
+    bucket = settings.storage_bucket_documents
+    try:
+        buckets = {b.name for b in await client.storage.list_buckets()}
+    except Exception:  # noqa: BLE001 - listing failure means "assume missing"
+        buckets = set()
+    if bucket not in buckets:
+        try:
+            await client.storage.create_bucket(bucket, options={"public": False})
+        except Exception as exc:  # noqa: BLE001 - audited below by the caller
+            logger.warning("storage_bucket_create_failed", bucket=bucket, error=str(exc)[:200])
+            return None, None
+    return client, bucket
 
 
 _DOC_SELECT = """
@@ -358,7 +485,7 @@ async def create_document(
                     INSERT INTO public.document_versions
                       (document_id, version_no, file_name, mime_type, byte_size,
                        storage_path, checksum_sha256, uploaded_by)
-                    VALUES (CAST(:did AS uuid), 1, :file_name, :content_type, :size,
+VALUES (CAST(:did AS uuid), 1, :bucket, :file_name, :content_type, :size,
                             :storage_path, :checksum, :actor)
                     RETURNING id
                     """

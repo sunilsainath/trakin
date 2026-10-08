@@ -330,7 +330,7 @@ async def record_event_for_audit(event: dict[str, Any]) -> None:
                        resource_id, resource_public_id, new_values, metadata)
                     VALUES (CAST(:cid AS uuid), 'SYSTEM', 'outbox', :action, :rtype,
                             CAST(:rid AS uuid), :rpublic, CAST(:new AS jsonb),
-                            jsonb_build_object('event_id', :eid::text))
+                            jsonb_build_object('event_id', CAST(:eid AS text)))
                     """
                 ),
                 {

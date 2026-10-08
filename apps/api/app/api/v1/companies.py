@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -21,6 +21,7 @@ from app.api.deps import (
     require_user,
 )
 from app.core.logging import get_logger
+from app.core.rate_limit import rate_limited
 from app.schemas.common import AckResponse
 from app.schemas.identity import (
     CompanyResponse,
@@ -111,6 +112,39 @@ async def create_company(
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
         payload=payload.model_dump(),
+    )
+
+
+@router.post(
+    "/companies/w9-upload",
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a founding W-9 before the company exists",
+    dependencies=[Depends(rate_limited("upload"))],
+)
+async def upload_founding_w9(
+    ctx_and_conn: UserOnlyContext,
+    file: Annotated[UploadFile, File(description="W-9 scan (PDF/image)")],
+) -> dict[str, Any]:
+    """Intake for company founding. No company context: the caller has none yet.
+
+    The file is validated, stored, and queued for scan/extract like any other
+    upload; the returned document id goes into `POST /companies`, which claims
+    it into the new company. Rate-limited like all uploads.
+    """
+    from app.core.config import get_settings
+    from app.services import documents as document_service
+
+    ctx, conn = ctx_and_conn
+    content = await file.read()
+    return await document_service.upload_w9_intake(
+        conn,
+        founder_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        file_name=file.filename or "w9.pdf",
+        content=content,
+        content_type=file.content_type or "application/pdf",
+        max_bytes=get_settings().max_upload_bytes,
     )
 
 

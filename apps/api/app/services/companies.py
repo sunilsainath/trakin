@@ -107,6 +107,9 @@ async def create_company(
             details={"required_document_type": "W9"},
         )
 
+    # The W-9 must be the founder's own unclaimed intake upload: a document
+    # belonging to another tenant (or an already-claimed one) is
+    # indistinguishable from a missing one, so it cannot be borrowed.
     w9_id = (
         (
             await conn.execute(
@@ -116,10 +119,12 @@ async def create_company(
                   FROM public.documents d
                  WHERE d.public_id = :pid
                    AND d.doc_type = 'W9'
+                   AND d.company_id IS NULL
+                   AND d.owner_user_id = :founder
                    AND d.deleted_at IS NULL
                 """
                 ),
-                {"pid": payload["w9_document_public_id"]},
+                {"pid": payload["w9_document_public_id"], "founder": founder_user_id},
             )
         )
         .mappings()
@@ -167,6 +172,12 @@ async def create_company(
 
     company_id = uuid.UUID(str(row["id"]))
 
+    # Claim the intake W-9 into the new company in the same transaction.
+    await conn.execute(
+        text("UPDATE public.documents SET company_id = :cid WHERE id = CAST(:w9 AS uuid)"),
+        {"cid": company_id, "w9": w9_id["id"]},
+    )
+
     # Copies the role templates and grants the founder SUPER_ADMIN.
     await conn.execute(
         text("SELECT app.bootstrap_company_roles(:cid, :uid)"),
@@ -178,7 +189,9 @@ async def create_company(
             """
             UPDATE public.companies
                SET settings = settings || jsonb_build_object(
-                       'onboarding', jsonb_build_object('founder_user_id', :uid::text))
+                       -- :uid::text would not parse as a bind param; CAST instead.
+                       'onboarding', jsonb_build_object(
+                           'founder_user_id', CAST(:uid AS text)))
              WHERE id = :cid
             """
         ),
