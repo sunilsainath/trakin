@@ -243,7 +243,7 @@ async def list_versions(conn: AsyncConnection, *, document_id: uuid.UUID) -> lis
             await conn.execute(
                 text(
                     """
-                    SELECT v.version_no, v.file_name, v.content_type, v.byte_size,
+                    SELECT v.version_no, v.file_name, v.mime_type AS content_type, v.byte_size,
                            v.checksum_sha256, v.created_at,
                            u.public_id AS uploaded_by,
                            NULLIF(TRIM(u.first_name || ' ' || u.last_name), '') AS uploaded_by_name
@@ -609,13 +609,14 @@ async def access_log(
             await conn.execute(
                 text(
                     """
-                    SELECT l.action, l.created_at, l.ip_address,
+                    SELECT l.access_type AS action, l.accessed_at AS created_at,
+                           l.ip_address,
                            u.public_id AS user_public_id,
                            NULLIF(TRIM(u.first_name || ' ' || u.last_name), '') AS user_name
                       FROM public.document_access_log l
                       LEFT JOIN public.users u ON u.id = l.user_id
                      WHERE l.document_id = :did
-                     ORDER BY l.created_at DESC LIMIT :limit
+                     ORDER BY l.accessed_at DESC LIMIT :limit
                     """
                 ),
                 {"did": document["id"], "limit": limit},
@@ -670,7 +671,7 @@ async def list_documents_for_entity(
                     """
                     SELECT d.id, d.public_id, d.doc_type, d.title, d.status,
                            d.version_count, d.created_at,
-                           v.file_name, v.content_type, v.byte_size
+                           v.file_name, v.mime_type AS content_type, v.byte_size
                       FROM public.documents d
                       LEFT JOIN public.document_versions v ON v.id = d.current_version_id
                      WHERE d.company_id = :cid AND d.related_type = :entity

@@ -85,7 +85,7 @@ async def resolve(
                     """
                     SELECT enabled, rollout_pct, config
                       FROM platform.feature_flags
-                     WHERE flag_key = :key
+                     WHERE key = :key
                     """
                 ),
                 {"key": key},
@@ -141,11 +141,11 @@ async def require(
     Used by AI and payment endpoints so a disabled capability returns
     FEATURE_DISABLED rather than a fabricated success.
     """
-    from app.core.errors import AppError
+    from app.core.errors import FeatureDisabledError
 
     flag = await resolve(conn, key, company_id=company_id, user_id=user_id)
     if not flag.enabled:
-        raise AppError(
+        raise FeatureDisabledError(
             f"The {key} capability is not enabled for this account.",
             details={"flag": key},
         )

@@ -1575,7 +1575,7 @@ async def leave_balances(
                       FROM public.leave_balances lb
                       JOIN public.leave_policies lp ON lp.id = lb.leave_policy_id
                      WHERE lb.user_id = CAST(:uid AS uuid) AND lb.company_id = CAST(:cid AS uuid)
-                       AND (:year IS NULL OR lb.year = :year)
+                       AND (CAST(:year AS int) IS NULL OR lb.year = :year)
                      ORDER BY lb.year DESC, lp.leave_type
                     """
                 ),

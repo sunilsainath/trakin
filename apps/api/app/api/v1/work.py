@@ -108,7 +108,9 @@ async def list_assignments(
         cursor_keys=_cursor(cursor),
     )
     for row in rows:
-        row.pop("id", None)
+        # Assignments are addressed by internal uuid in this API (PATCH takes
+        # it), so the id must be present and a string for the response model.
+        row["id"] = str(row.get("id"))
     return build_page(
         rows, limit=page_size, cursor_keys=("created_at", "user_id"), request_id=ctx.request_id
     )

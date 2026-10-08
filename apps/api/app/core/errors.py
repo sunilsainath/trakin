@@ -158,6 +158,20 @@ class IdempotencyKeyReuseError(AppError):
     public_message = "This Idempotency-Key was already used with a different request body."
 
 
+# ------------------------------------------------------------ feature gating
+class FeatureDisabledError(AppError):
+    """A capability switched off by feature flag.
+
+    Raised by flags.require(); the docstring there promises a typed 503, and a
+    disabled capability is a 503 (like an unconfigured integration), never a
+    500 that pages anyone.
+    """
+
+    code = "FEATURE_DISABLED"
+    status_code = 503
+    public_message = "This capability is not enabled for this account."
+
+
 # ------------------------------------------------------------------ rate limit
 class RateLimitExceededError(AppError):
     code = "RATE_LIMIT_EXCEEDED"

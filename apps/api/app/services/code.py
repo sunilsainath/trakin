@@ -797,10 +797,12 @@ async def deactivate_project_role(
         ),
         {"rid": before["id"]},
     )
-    if _num(live.scalar()) > 0:
+    # A Result is single-use: scalar() twice raises ResourceClosedError.
+    live_count = int(_num(live.scalar()))
+    if live_count > 0:
         raise BusinessRuleViolationError(
             "This role still has live assignments. End them before closing the role.",
-            details={"assignments": int(_num(live.scalar()))},
+            details={"assignments": live_count},
         )
 
     await conn.execute(

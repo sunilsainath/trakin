@@ -54,6 +54,7 @@ _INVOICE_SELECT = """
            i.rejected_reason, i.notes, i.terms_snapshot, i.submitted_at, i.approved_at,
            i.paid_at, i.cancelled_at, i.document_id, i.locked, i.version,
            i.created_at, i.updated_at,
+           c0.public_id AS company_public_id,
            c.public_id AS contract_public_id, c.title AS contract_title,
            p.public_id AS project_public_id, p.name AS project_name,
            s.public_id AS sow_public_id, s.title AS sow_title,
@@ -65,6 +66,7 @@ _INVOICE_SELECT = """
            COALESCE(items.item_count, 0)  AS item_count,
            COALESCE(roles.role_ids, '{}') AS role_ids
       FROM public.invoices i
+      JOIN public.companies c0 ON c0.id = i.company_id
       JOIN public.contracts c ON c.id = i.contract_id
       LEFT JOIN public.projects p ON p.id = i.project_id
       LEFT JOIN public.sows s      ON s.id = i.sow_id
@@ -120,6 +122,7 @@ def _invoice_from_row(row: Any) -> dict[str, Any]:
     data["contract_id"] = data.pop("contract_public_id")
     data["project_id"] = data.pop("project_public_id", None)
     data["sow_id"] = data.pop("sow_public_id", None)
+    data["company_id"] = data.pop("company_public_id")
     data["counterparty_company_id"] = data.pop("counterparty_company_public_id", None)
     data["counterparty_user_id"] = data.pop("counterparty_user_public_id", None)
     data.pop("contract_title", None)
@@ -809,8 +812,9 @@ async def transition_invoice(
 
     await conn.execute(
         text(
-            "UPDATE public.invoices SET status = :target, disputed_reason = CASE WHEN :target"
-            " = 'DISPUTED' THEN :reason ELSE disputed_reason END WHERE id = :rid"
+            "UPDATE public.invoices SET status = CAST(:target AS invoice_status),"
+            " disputed_reason = CASE WHEN :target = 'DISPUTED'"
+            " THEN CAST(:reason AS text) ELSE disputed_reason END WHERE id = :rid"
         ),
         {"target": target, "reason": reason, "rid": before["id"]},
     )

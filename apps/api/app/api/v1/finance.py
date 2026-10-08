@@ -28,6 +28,7 @@ from app.schemas.finance import (
     BillingRunRequest,
     BillingRunResponse,
     CreatePaymentRequestBody,
+    CreditNoteRequest,
     ExchangePlaidTokenRequest,
     GenerateInvoiceRequest,
     InvoiceActionRequest,
@@ -491,11 +492,10 @@ async def cancel_invoice(
     summary="Issue a credit note",
 )
 async def issue_credit_note(
-    ctx_and_conn: InvoicesCreate, invoice_id: str, payload: dict[str, Any]
+    ctx_and_conn: InvoicesCreate, invoice_id: str, payload: CreditNoteRequest
 ) -> dict[str, Any]:
-    from app.schemas.finance import CreditNoteRequest
-
-    body = CreditNoteRequest.model_validate(payload)
+    # Validated by FastAPI: an invalid body is a typed 422, never a 500 from a
+    # manual model_validate call.
     ctx, conn = ctx_and_conn
     return await billing_service.issue_credit_note(
         conn,
@@ -504,8 +504,8 @@ async def issue_credit_note(
         actor_user_id=ctx.user_id,
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
-        amount=body.amount,
-        reason=body.reason,
+        amount=payload.amount,
+        reason=payload.reason,
     )
 
 

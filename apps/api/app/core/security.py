@@ -129,10 +129,11 @@ class TokenVerifier:
             raise AuthenticationError("Expected a Bearer token.")
 
         claims = self.verify(token.strip())
-        settings = self._settings
 
-        if settings.require_email_verification and not claims.get("email_verified"):
-            raise EmailNotVerifiedError()
+        # NOTE: Supabase Auth access tokens do not carry an `email_verified`
+        # claim, so verification is enforced from the platform row instead
+        # (see assert_account_active), where the value is synced from Supabase
+        # by POST /auth/bootstrap. Gating here would reject every session.
 
         if claims.get("role") in {"service_role", "supabase_admin"}:
             # A service-role token must never be usable as an end-user session.
@@ -162,15 +163,21 @@ async def assert_account_active(
 
     Raises rather than returning a partially-valid identity, so a suspended or
     deactivated account can never reach a business handler.
+
+    Email verification is read from the platform row (`email_verified_at`,
+    synced from Supabase by POST /auth/bootstrap), never from the access
+    token: Supabase does not issue an `email_verified` JWT claim.
     """
     from sqlalchemy import text
+
+    from app.core.config import get_settings
 
     row = (
         (
             await db.execute(
                 text(
                     """
-            SELECT u.id::text, u.status
+            SELECT u.id::text, u.status, u.email_verified_at
               FROM public.users u
              WHERE u.auth_id = :auth_id
             """
@@ -184,23 +191,33 @@ async def assert_account_active(
 
     if row is None:
         # Provisioned on first authenticated request, mirroring auth.users.
+        # Verification starts NULL and is synced by POST /auth/bootstrap.
         return await provision_user(db, auth_id, email=email, first_name=first_name)
 
     if row["status"] == "SUSPENDED":
         raise AccountDisabledError("This account has been suspended.")
     if row["status"] == "DEACTIVATED":
         raise AccountDisabledError("This account has been deactivated.")
-    if row["status"] == "PENDING_VERIFICATION":
+    if row["status"] == "PENDING_VERIFICATION" or (
+        get_settings().require_email_verification and row["email_verified_at"] is None
+    ):
         raise EmailNotVerifiedError()
 
     return str(row["id"])
 
 
-async def provision_user(db: Any, auth_id: str, *, email: str = "", first_name: str = "") -> str:
+async def provision_user(
+    db: Any, auth_id: str, *, email: str = "", first_name: str = "", verified: bool = False
+) -> str:
     """Create the platform user row for a first-time authenticated request.
 
     Runs inside the caller's transaction so a failure leaves nothing behind.
     The `public.users_public_id` trigger allocates the immutable public id.
+
+    New rows start PENDING_VERIFICATION with a NULL confirmation timestamp:
+    `ck_user_email_verified_status` forbids ACTIVE without one. POST
+    /auth/bootstrap flips a Supabase-confirmed user to ACTIVE. Test fixtures
+    pass verified=True to simulate an already-confirmed user.
     """
     from sqlalchemy import text
 
@@ -216,7 +233,10 @@ async def provision_user(db: Any, auth_id: str, *, email: str = "", first_name: 
             INSERT INTO public.users
               (auth_id, email, email_verified_at, first_name, last_name, status)
             VALUES
-              (:auth_id, :email, now(), :first_name, '', 'ACTIVE')
+              (:auth_id, :email,
+               CASE WHEN :verified THEN now() ELSE NULL END,
+               :first_name, '',
+               CASE WHEN :verified THEN 'ACTIVE' ELSE 'PENDING_VERIFICATION' END)
             ON CONFLICT (auth_id) DO UPDATE SET auth_id = EXCLUDED.auth_id
             RETURNING id::text
             """
@@ -225,6 +245,7 @@ async def provision_user(db: Any, auth_id: str, *, email: str = "", first_name: 
                     "auth_id": auth_id,
                     "email": email or f"{auth_id}@pending.invalid",
                     "first_name": first_name or "Member",
+                    "verified": verified,
                 },
             )
         )

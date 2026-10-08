@@ -787,10 +787,25 @@ async def _history_findings(
     conn: AsyncConnection, *, company_id: uuid.UUID, invoice: dict[str, Any]
 ) -> list[Finding]:
     """Duplicate detection and amount sanity against this customer's history."""
+    # get_invoice exposes the counterparty as a public CO... id; the column is
+    # a uuid, so resolve it first (a public id bound as uuid is DataError).
+    cp_internal = None
+    if invoice.get("counterparty_company_id"):
+        cp_row = (
+            (
+                await conn.execute(
+                    text("SELECT id FROM public.companies WHERE public_id = :p"),
+                    {"p": invoice["counterparty_company_id"]},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        cp_internal = cp_row["id"] if cp_row else None
     params = {
         "cid": company_id,
         "iid": invoice["id"],
-        "cp": invoice.get("counterparty_company_id"),
+        "cp": cp_internal,
     }
     duplicates = await conn.execute(
         text(
@@ -1237,11 +1252,11 @@ async def _project_billing_signals(conn: AsyncConnection, project: Any) -> dict[
     pending = await conn.execute(
         text(
             """
-            SELECT COALESCE(sum(cr.rate * COALESCE(t.billable_hours,0)), 0) AS potential
+            SELECT COALESCE(sum(cr.rate * COALESCE(t.billed_hours,0)), 0) AS potential
               FROM public.contract_roles cr
               LEFT JOIN public.project_roles pr ON pr.id = cr.project_role_id
               LEFT JOIN LATERAL (
-                    SELECT sum(billable_hours) FROM public.timesheets t
+                    SELECT sum(billable_hours) AS billed_hours FROM public.timesheets t
                      WHERE t.contract_role_id = cr.id AND t.status = 'APPROVED'
               ) t ON TRUE
              WHERE cr.project_role_id IN (
@@ -1567,20 +1582,37 @@ def available_agents() -> list[dict[str, Any]]:
     full catalogue so the UI can explain what is available.
     """
     agents: Any = get_agents().list()
+
+    _raise: Any = object()
+
+    def _get(item: Any, name: str, default: Any = _raise) -> Any:
+        # The registry yields plain dicts; attribute access keeps working if it
+        # ever yields objects instead.
+        if isinstance(item, dict):
+            if name in item:
+                return item[name]
+        elif hasattr(item, name):
+            return getattr(item, name)
+        if default is _raise:
+            raise KeyError(name)
+        return default
+
     catalogue: list[dict[str, Any]] = [
         {
-            "key": agent.key,
-            "display_name": agent.display_name,
-            "purpose": agent.purpose,
+            "key": _get(agent, "key"),
+            "display_name": _get(agent, "display_name"),
+            "purpose": _get(agent, "purpose"),
             "tools": [
                 {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "required_permission": tool.required_permission,
-                    "risk_level": tool.risk_level,
-                    "mutating": tool.mutating,
+                    "name": _get(tool, "name"),
+                    "description": _get(tool, "description"),
+                    "required_permission": _get(tool, "required_permission"),
+                    "risk_level": _get(tool, "risk_level"),
+                    "mutating": _get(tool, "mutating"),
                 }
-                for tool in agent.tools
+                # A catalogue entry without tools is valid (no capabilities
+                # to offer); it must not fail the whole listing.
+                for tool in _get(agent, "tools", [])
             ],
         }
         for agent in agents

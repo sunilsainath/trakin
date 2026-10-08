@@ -54,12 +54,32 @@ function LoginFormInner() {
   const searchParams = useSearchParams()
   const next = searchParams.get('next') ?? '/dashboard'
 
-  const [notice, setNotice] = React.useState<{ tone: 'info' | 'danger'; text: string } | null>(null)
+  const [notice, setNotice] = React.useState<{ tone: 'info' | 'danger'; text: string } | null>(
+    searchParams.get('error') === 'unverified'
+      ? {
+          tone: 'info',
+          text: 'Please verify your email address first — check your inbox for the confirmation link.',
+        }
+      : null,
+  )
   // Remembered so the email-link button can reuse the address already typed.
   const [email, setEmail] = React.useState('')
 
+  const [mfaChallenge, setMfaChallenge] = React.useState<{
+    factorId: string
+    challengeId: string
+  } | null>(null)
+  const [mfaCode, setMfaCode] = React.useState('')
+  const [verifyingMfa, setVerifyingMfa] = React.useState(false)
+
+  const finish = () => {
+    router.replace(next)
+    router.refresh()
+  }
+
   const onSubmit = async (values: LoginValues) => {
     setNotice(null)
+    setMfaChallenge(null)
     setEmail(values.email)
     window.localStorage.setItem('mytrakin.lastLoginEmail', values.email)
 
@@ -76,9 +96,46 @@ function LoginFormInner() {
     }
 
     if (data.session) {
-      router.replace(next)
-      router.refresh()
+      finish()
+      return
     }
+
+    // A user with an enrolled authenticator gets here with no session: the
+    // second factor is still outstanding.
+    if (data.user) {
+      const { data: factors, error: factorsError } = await getSupabase().auth.mfa.listFactors()
+      const totp = factors?.totp?.[0]
+      if (factorsError || !totp) {
+        setNotice({ tone: 'danger', text: 'Sign-in needs a second step that failed to start.' })
+        return
+      }
+      const { data: challenged, error: challengeError } =
+        await getSupabase().auth.mfa.challenge({ factorId: totp.id })
+      if (challengeError || !challenged) {
+        setNotice({ tone: 'danger', text: 'Could not start two-factor verification.' })
+        return
+      }
+      setMfaChallenge({ factorId: totp.id, challengeId: challenged.id })
+      setNotice({ tone: 'info', text: 'Enter the code from your authenticator app.' })
+    }
+  }
+
+  const verifyMfa = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!mfaChallenge || verifyingMfa) return
+    setVerifyingMfa(true)
+    setNotice(null)
+    const { data, error } = await getSupabase().auth.mfa.verify({
+      factorId: mfaChallenge.factorId,
+      challengeId: mfaChallenge.challengeId,
+      code: mfaCode.trim(),
+    })
+    setVerifyingMfa(false)
+    if (error || !data) {
+      setNotice({ tone: 'danger', text: error?.message ?? 'That code is not correct.' })
+      return
+    }
+    finish()
   }
 
   const [sendingLink, setSendingLink] = React.useState(false)
@@ -120,6 +177,33 @@ function LoginFormInner() {
         onSubmit={onSubmit}
         banner={null}
       />
+
+      {mfaChallenge ? (
+        <form
+          onSubmit={(event) => void verifyMfa(event)}
+          className="space-y-3 rounded-md border border-border bg-surface p-3"
+        >
+          <label htmlFor="mfa-code" className="block text-sm font-medium text-foreground">
+            Authenticator code
+          </label>
+          <input
+            id="mfa-code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            value={mfaCode}
+            onChange={(event) => setMfaCode(event.target.value)}
+            placeholder="123456"
+            className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+          />
+          <button
+            type="submit"
+            disabled={verifyingMfa || mfaCode.trim().length === 0}
+            className="inline-flex h-10 w-full items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          >
+            {verifyingMfa ? 'Verifying…' : 'Verify and sign in'}
+          </button>
+        </form>
+      ) : null}
 
       <div className="flex items-center justify-between text-sm">
         <a href="/forgot-password" className="text-primary hover:underline">

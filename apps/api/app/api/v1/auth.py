@@ -34,13 +34,70 @@ SessionContext = Annotated[tuple[RequestContext, AsyncConnection], Depends(requi
 
 @router.post("/bootstrap", response_model=AckResponse, summary="Ensure the platform user exists")
 async def bootstrap(ctx_and_conn: SessionContext, response: Response) -> AckResponse:
-    """Called once after signup. Creates the profile and default preferences.
+    """Called once after signup, and defensively on every session start.
 
-    Idempotent: calling it again on an existing account changes nothing, so the
-    frontend can call it defensively on every session start.
+    The platform row already exists by the time this runs (provisioned on the
+    first authenticated request). This call syncs email verification state
+    from Supabase Auth into `public.users.email_verified_at`, which is what
+    `assert_account_active` enforces — the access token itself carries no
+    verifiable claim.
+
+    Idempotent: calling it again changes nothing once synced.
     """
     ctx, conn = ctx_and_conn
+    await _sync_verification(conn, ctx)
     return AckResponse(ok=True, message="Account ready.", request_id=ctx.request_id)
+
+
+async def _sync_verification(conn: AsyncConnection, ctx: RequestContext) -> None:
+    """Mirror Supabase's confirmation timestamp into the platform row."""
+    import httpx
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    base = (settings.supabase_url or "").rstrip("/")
+    service_key = settings.supabase_service_role_key.get_secret_value()
+    if not base or not service_key:
+        logger.warning("verification_sync_skipped", reason="supabase_not_configured")
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{base}/auth/v1/admin/users/{ctx.auth.auth_id}",
+                headers={
+                    "apikey": service_key,
+                    "Authorization": f"Bearer {service_key}",
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - sync is best-effort, never fatal
+        logger.warning("verification_sync_failed", error=str(exc)[:200])
+        return
+
+    if response.status_code != 200:
+        logger.warning("verification_sync_failed", status=response.status_code)
+        return
+
+    payload = response.json()
+    confirmed_at = payload.get("email_confirmed_at") or payload.get("confirmed_at")
+    if confirmed_at:
+        # Confirmation activates the account: ck_user_email_verified_status
+        # forbids ACTIVE without a timestamp, and assert_account_active
+        # rejects PENDING_VERIFICATION.
+        await conn.execute(
+            text(
+                """
+                UPDATE public.users
+                   SET email = COALESCE(NULLIF(:email, ''), email),
+                       email_verified_at = COALESCE(
+                           CAST(:confirmed AS timestamptz), email_verified_at),
+                       status = 'ACTIVE'
+                 WHERE id = :uid
+                """
+            ),
+            {"email": ctx.auth.email, "confirmed": confirmed_at, "uid": ctx.user_id},
+        )
 
 
 @router.get("/me", summary="Current identity")

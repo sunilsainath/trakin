@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.api.deps import RequestContext, require_user
 from app.schemas.common import AckResponse, Page, build_page, clamp_limit
 from app.schemas.identity import (
+    NotificationPreferenceItem,
     SearchHit,
     UpdateMeRequest,
     UserProfileResponse,
@@ -63,6 +64,32 @@ async def set_privacy(
         request_id=ctx.request_id,
     )
     return AckResponse(ok=True, message="Privacy settings saved.", request_id=ctx.request_id)
+
+
+@router.get(
+    "/me/notification-preferences",
+    summary="My per-category notification channels",
+)
+async def get_my_notification_preferences(ctx_and_conn: UserContext) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await identity.get_notification_preferences(conn, user_id=ctx.user_id)
+
+
+@router.put(
+    "/me/notification-preferences",
+    summary="Set per-category notification channels",
+)
+async def set_my_notification_preferences(
+    ctx_and_conn: UserContext, payload: list[NotificationPreferenceItem]
+) -> list[dict[str, Any]]:
+    """Unknown categories are rejected; delivery is in-app/email/push per row."""
+    ctx, conn = ctx_and_conn
+    return await identity.set_notification_preferences(
+        conn,
+        user_id=ctx.user_id,
+        preferences=[item.model_dump() for item in payload],
+        request_id=ctx.request_id,
+    )
 
 
 @router.get(

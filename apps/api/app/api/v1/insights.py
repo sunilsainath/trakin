@@ -83,7 +83,7 @@ async def list_notifications(
     if unread_only:
         where.append("n.read_at IS NULL")
     if category:
-        where.append("n.category = :category")
+        where.append("n.type = :category")
         params["category"] = category
     if keys.get("created_at"):
         where.append("(n.created_at, n.id) < (:cur_created, :cur_id)")
@@ -95,8 +95,8 @@ async def list_notifications(
             await conn.execute(
                 text(
                     f"""
-                    SELECT n.id::text, n.category, n.title, n.body, n.action_url,
-                           n.entity_type, n.read_at, n.created_at, n.metadata
+                    SELECT n.id::text, n.type AS category, n.title, n.body, n.action_url,
+                           n.resource_type AS entity_type, n.read_at, n.created_at, n.metadata
                       FROM platform.notifications n
                      WHERE {" AND ".join(where)}
                      ORDER BY n.created_at DESC, n.id DESC
@@ -297,7 +297,7 @@ async def list_insights(
     offset: int = Query(0, ge=0),
 ) -> Page[Any]:
     ctx, conn = ctx_and_conn
-    where = ["i.company_id = :cid", "(i.expires_at IS NULL OR i.expires_at > now())"]
+    where = ["i.company_id = :cid", "(i.valid_until IS NULL OR i.valid_until > now())"]
     params: dict[str, Any] = {"cid": company_scope(ctx), "limit": limit, "offset": offset}
     if entity_type:
         where.append("i.entity_type = :entity_type")
@@ -312,8 +312,9 @@ async def list_insights(
                 text(
                     f"""
                     SELECT i.public_id, i.insight_type, i.severity, i.title, i.summary,
-                           i.entity_type, i.entity_public_id, i.data, i.confidence,
-                           i.created_at, i.expires_at
+                           i.entity_type, i.entity_id::text AS entity_public_id,
+                           i.data_snapshot AS data, i.confidence,
+                           i.created_at, i.valid_until AS expires_at
                       FROM public.ai_insights i
                      WHERE {" AND ".join(where)}
                      ORDER BY i.created_at DESC
@@ -338,7 +339,7 @@ async def list_domain_agents(ctx_and_conn: AiRead) -> dict[str, Any]:
     agents = ai_domain.available_agents()
     for agent in agents:
         agent["available_tools"] = [
-            tool for tool in agent["tools"] if ctx.can(tool["required_permission"])
+            tool for tool in agent.get("tools", []) if ctx.can(tool.get("required_permission", ""))
         ]
     return {"data": agents, "request_id": ctx.request_id}
 
@@ -362,8 +363,9 @@ async def list_knowledge(
             await conn.execute(
                 text(
                     f"""
-                    SELECT k.public_id, k.title, k.source_type, k.status, k.chunk_count,
-                           k.token_count, k.language, k.created_at, k.updated_at
+                    SELECT k.public_id, k.title, k.source_type,
+                           k.extraction_state AS status, k.chunk_count,
+                           k.is_active, k.created_at, k.updated_at
                       FROM public.ai_knowledge_documents k
                      WHERE {" AND ".join(where)}
                      ORDER BY k.updated_at DESC
@@ -394,7 +396,9 @@ async def list_automations(
                 text(
                     """
                     SELECT a.public_id, a.name, a.description, a.trigger_type, a.is_active,
-                           a.schedule_cron, a.risk_level, a.last_run_at, a.run_count,
+                           CASE WHEN a.requires_human_approval THEN 'HIGH' ELSE 'STANDARD' END
+                               AS risk_level,
+                           NULL AS schedule_cron, a.last_run_at, a.run_count,
                            a.created_at
                       FROM public.ai_automations a
                      WHERE a.company_id = :cid
@@ -428,13 +432,13 @@ async def list_ai_actions(
                     """
                     SELECT a.public_id, a.agent_key, a.action_type, a.target_type,
                            a.status, a.risk_level, a.required_permission, a.rationale,
-                           a.parameters, a.created_at, a.expires_at,
+                           a.proposal AS parameters, a.created_at, a.expires_at,
                            u.public_id AS proposed_by
                       FROM public.ai_actions a
-                      LEFT JOIN public.users u ON u.id = a.proposed_by
+                      LEFT JOIN public.users u ON u.id = a.initiated_by
                      WHERE a.company_id = :cid
-                       AND (:status IS NULL OR a.status = :status)
-                       AND (:uid IS NULL OR a.proposed_by = :uid)
+                       AND (CAST(:status AS text) IS NULL OR a.status = :status)
+                       AND (CAST(:uid AS uuid) IS NULL OR a.initiated_by = :uid)
                      ORDER BY a.created_at DESC
                      LIMIT :limit OFFSET :offset
                     """

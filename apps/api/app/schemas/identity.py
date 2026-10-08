@@ -17,6 +17,24 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 PublicId = str
 
 
+class NotificationPreferenceItem(BaseModel):
+    """One category's delivery channels. Unknown categories are rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str = Field(min_length=1, max_length=32)
+    in_app: bool = True
+    email: bool = True
+    push: bool = True
+
+
+class NotificationPreferenceResponse(BaseModel):
+    category: str
+    in_app: bool
+    email: bool
+    push: bool
+
+
 class UserRef(BaseModel):
     """A user as referenced elsewhere. No contact details."""
 

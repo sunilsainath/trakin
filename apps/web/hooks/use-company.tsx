@@ -72,6 +72,9 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     setLoading(true)
     setError(null)
     try {
+      // Syncs email verification from Supabase on every session start; throws
+      // EMAIL_NOT_VERIFIED when the platform row is still unconfirmed.
+      await api.post('/auth/bootstrap')
       // The profile lives under the identity router (GET /api/v1/users/me).
       const profile = await api.get<Me>('/users/me')
       setMe(profile)
@@ -90,6 +93,8 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === 'AUTHENTICATION_FAILED') {
         router.replace(`/login?next=${encodeURIComponent(pathname)}`)
+      } else if (cause instanceof ApiError && cause.code === 'EMAIL_NOT_VERIFIED') {
+        router.replace('/login?error=unverified')
       } else if (cause instanceof ApiError) {
         setError(cause)
       } else {

@@ -422,3 +422,84 @@ async def set_privacy(
         request_id=request_id,
     )
     return field_visibility
+
+
+async def get_notification_preferences(
+    conn: AsyncConnection, *, user_id: uuid.UUID
+) -> list[dict[str, Any]]:
+    """The caller's per-category delivery channels."""
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT category, in_app, email, push
+                      FROM platform.notification_preferences
+                     WHERE user_id = :uid
+                     ORDER BY category
+                    """
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def set_notification_preferences(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    preferences: list[dict[str, Any]],
+    request_id: str,
+) -> list[dict[str, Any]]:
+    """Replace delivery channels per category (unknown categories rejected)."""
+    from app.core.errors import ValidationError
+
+    known = set(
+        (
+            await conn.execute(
+                text("SELECT DISTINCT category FROM platform.notification_preferences")
+            )
+        ).scalars()
+    )
+    for pref in preferences:
+        category = str(pref.get("category", "")).upper()
+        if category not in known:
+            raise ValidationError(
+                f"Unknown notification category: {pref.get('category')}.",
+                details={"category": pref.get("category")},
+            )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO platform.notification_preferences
+                  (user_id, category, in_app, email, push)
+                VALUES (:uid, :category, :in_app, :email, :push)
+                ON CONFLICT (user_id, category) DO UPDATE SET
+                  in_app = EXCLUDED.in_app,
+                  email = EXCLUDED.email,
+                  push = EXCLUDED.push
+                """
+            ),
+            {
+                "uid": user_id,
+                "category": category,
+                "in_app": bool(pref.get("in_app", True)),
+                "email": bool(pref.get("email", True)),
+                "push": bool(pref.get("push", True)),
+            },
+        )
+
+    await audit.record(
+        conn,
+        action="profile.notifications_updated",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values={"categories": len(preferences)},
+        request_id=request_id,
+    )
+    return await get_notification_preferences(conn, user_id=user_id)

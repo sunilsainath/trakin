@@ -217,7 +217,8 @@ async def company_dashboard(
     company: Any = (
         await conn.execute(
             text(
-                "SELECT name, public_id, currency, settings FROM public.companies WHERE id = :cid"
+                "SELECT COALESCE(display_name, legal_name) AS name, public_id,"
+                " default_currency AS currency, settings FROM public.companies WHERE id = :cid"
             ),
             {"cid": company_id},
         )
@@ -304,7 +305,7 @@ async def company_dashboard(
                         SELECT public_id, insight_type, severity, title, summary, created_at
                           FROM public.ai_insights
                          WHERE company_id = :cid
-                           AND (expires_at IS NULL OR expires_at > now())
+                           AND (valid_until IS NULL OR valid_until > now())
                          ORDER BY CASE severity
                                     WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
                                     WHEN 'MEDIUM' THEN 2 ELSE 3 END,

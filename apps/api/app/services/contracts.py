@@ -1244,13 +1244,12 @@ async def terminate_contract(
         ),
         {"cid": before["id"]},
     )
-    if as_decimal(open_invoices.scalar()) > 0:
+    # A Result is single-use: read the scalar once.
+    open_count = int(as_decimal(open_invoices.scalar()))
+    if open_count > 0:
         raise BusinessRuleViolationError(
             "Settle or cancel the open invoices before terminating this contract.",
-            details={
-                "reason": "OPEN_INVOICES",
-                "open_invoices": int(as_decimal(open_invoices.scalar())),
-            },
+            details={"reason": "OPEN_INVOICES", "open_invoices": open_count},
         )
 
     notice = before.get("termination_notice_days")

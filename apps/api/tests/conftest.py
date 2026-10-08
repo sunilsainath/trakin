@@ -146,6 +146,9 @@ def tenants(_environment: None) -> dict[str, Tenant]:
                             str(uuid.uuid4()),
                             email=f"{key}_{marker}{TEST_EMAIL_DOMAIN}",
                             first_name=key.title(),
+                            # Fixtures simulate Supabase-confirmed users; real
+                            # signups start PENDING_VERIFICATION instead.
+                            verified=True,
                         )
                     )
 

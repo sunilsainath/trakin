@@ -93,52 +93,21 @@ EXPECTED_SERVER_ERRORS: dict[str, str] = {
     # projects, GET/GET sows, GET sows/{id}/versions, POST sows/{id}/terminate,
     # GET/GET contracts, GET contracts/{id}/roles, POST contracts/{id}/approvals,
     # POST contracts/{id}/close (D1 lateral alias; D9 metadata).
-    # ---- D1 (still failing)
-    "GET /api/v1/projects/{project_id}": "D1 code.py:287 get_project single-read (list heals, read still 500s)",
-    "GET /api/v1/invoices": "D1 invoicing.py:318 list_invoices -> cp.name",
-    "GET /api/v1/invoices/{invoice_id}": "D1 invoicing.py:139 get_invoice -> cp.name",
-    "POST /api/v1/invoices/{invoice_id}/credit-notes": "D1 invoicing.py get_invoice -> cp.name",
-    "POST /api/v1/invoices/{invoice_id}/validate": "D1 invoicing.py:139 get_invoice",
-    "GET /api/v1/dashboard": 'D1 dashboard.py:217 company_dashboard -> "name"',
-    # ---- D7 (still failing; list-documents, single-timesheet and
-    # update-assignment healed 2026-10-09 via mime_type/content fixes)
-    "GET /api/v1/assignments": "D7 work.py:146 list_assignments",
-    "GET /api/v1/documents/{document_id}": "D7 documents.py:218 get_document",
-    # ---- D9 (only terminate still 500s; the rest healed with 0017)
-    "POST /api/v1/contracts/{contract_id}/terminate": (
-        "D9 contracts.py:1253 terminate_contract (ends in get_contract)"
-    ),
-    # ---- D10
-    "GET /api/v1/notifications": "D10 insights.py:95 list_notifications -> n.category",
-    # ---- D11
-    "GET /api/v1/ai/actions": "D11 insights.py:426 -> a.proposed_by",
-    "GET /api/v1/ai/automations": "D11 insights.py:393 -> a.schedule_cron",
-    "GET /api/v1/ai/insights": "D11 insights.py:311 -> i.entity_public_id",
-    "GET /api/v1/ai/knowledge": "D11 insights.py:362 -> k.status",
-    "GET /api/v1/ai/project-intelligence/{project_id}": (
-        "D11 ai_domain.py:1238 _project_billing_signals -> t.billable_hours"
-    ),
-    "GET /api/v1/ai/capabilities": 'D11 flags.py:83/128 resolve -> "flag_key"',
-    "POST /api/v1/ai/agents/{agent_key}/plan": 'D11 flags.py:83/146 require -> "flag_key"',
-    "GET /api/v1/documents/{document_id}/access-log": "D11 documents.py:611 access_log -> l.action",
-    # ---- D12
-    "GET /api/v1/leave/balances": (
-        "D12 work.py:1562 leave_balances -> could not determine data type of parameter"
-    ),
-    # ---- D13: not SQL at all
-    "GET /api/v1/ai/agents": (
-        "D13 ai_domain.py:1574 available_agents -> AttributeError: 'dict' has no 'key'"
-    ),
-    "DELETE /api/v1/project-roles/{role_id}": (
-        "D13 code.py:803 deactivate_project_role -> ResourceClosedError: "
-        "live.scalar() is called twice on the same Result"
-    ),
-    "POST /api/v1/invoices/{invoice_id}/cancel": (
-        "D13 invoicing.py:811 transition_invoice -> inconsistent types deduced for parameter"
-    ),
-    "POST /api/v1/msas/{msa_id}/request": (
-        "D13 msas.py:651 create_request -> violates check constraint msas_status_check"
-    ),
+    # Healed 2026-10-09 (round 3): assignments id, documents mime_type x3,
+    # dashboard company columns + ai_insights columns, invoice company_id,
+    # project dashboard, lateral alias, contracts double-scalar.
+    # Healed 2026-10-09 (round 4): invoices cancel (enum cast), credit-notes
+    # (FastAPI-validated 422).
+    # Healed 2026-10-09: notifications (type/resource_type), ai/automations
+    # (trigger columns), ai/insights (valid_until/entity_id), ai/knowledge
+    # (extraction_state), ai/project-intelligence (lateral alias),
+    # ai/capabilities + agents/{key}/plan (flag key), documents access-log
+    # (access_type), leave/balances (typed bind), ai/agents (dict-safe),
+    # project-roles delete (single scalar), invoices/cancel (typed reason),
+    # msas request (MSA_REQUESTED). Pruned from this pin as the sweep proved.
+    # Healed 2026-10-09 (round 5): ai/actions (uuid-cast uid), invoices/cancel
+    # (invoice_status enum cast). EXPECTED_SERVER_ERRORS is now empty: no
+    # domain endpoint returns an untyped 500.
 }
 
 # Endpoints whose addressed row cannot exist in this environment, so a typed 404
@@ -156,6 +125,9 @@ TYPED_SERVER_ERRORS: dict[str, str] = {
     ),
     "POST /api/v1/bank-accounts/connections/{connection_id}/sync": (
         "503 INTEGRATION_NOT_CONFIGURED: Plaid has no credentials in this environment"
+    ),
+    "POST /api/v1/ai/agents/{agent_key}/plan": (
+        "503 FEATURE_DISABLED: the ai.agents flag is off in this environment"
     ),
 }
 
@@ -826,15 +798,28 @@ async def test_every_domain_endpoint_answers(api: httpx.AsyncClient, world: dict
 
 
 # Formerly xfail DEFECT D13: RequestContextMiddleware now attaches X-Request-Id
-# on the 500 path as well (see app/main.py), verified 2026-10-08.
+# on the 500 path as well (see app/main.py). It used to probe a naturally
+# failing endpoint; with every pinned 500 fixed, it forces one instead by
+# making the auth dependency raise inside the request.
 async def test_a_server_error_response_still_carries_the_request_id(
     api: httpx.AsyncClient,
 ) -> None:
     """The 500 path must be correlatable, exactly like every other response."""
-    response = await _call(api, "GET", "/api/v1/notifications")
+    from app.api.deps import require_company
+    from app.main import app
+
+    async def _boom():
+        raise RuntimeError("synthetic failure for request-id correlation")
+
+    app.dependency_overrides[require_company] = _boom
+    try:
+        response = await _call(api, "GET", "/api/v1/projects")
+    finally:
+        app.dependency_overrides.clear()
     assert response.status_code == 500
     assert response.headers.get("X-Request-Id"), "a 500 arrived with no X-Request-Id header"
-    assert response.json()["error"]["request_id"]
+    body = response.json()
+    assert body["error"]["request_id"] == response.headers["X-Request-Id"]
 
 
 async def test_openapi_document_is_well_formed(anon_api: httpx.AsyncClient) -> None:

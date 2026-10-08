@@ -653,7 +653,7 @@ async def create_request(
 
     if str(msa["status"]) == "NO_MSA":
         await conn.execute(
-            text("UPDATE public.msas SET status = 'REQUESTED' WHERE id = :rid"),
+            text("UPDATE public.msas SET status = 'MSA_REQUESTED' WHERE id = :rid"),
             {"rid": msa["id"]},
         )
 
