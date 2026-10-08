@@ -658,6 +658,41 @@ async def list_connections(
     return out
 
 
+async def list_requests(conn: AsyncConnection, *, viewer_id: uuid.UUID) -> dict[str, Any]:
+    """Pending connection requests, split by direction.
+
+    Incoming can be accepted or declined; outgoing are waiting on the other
+    side. Decided requests disappear: history lives in the audit log.
+    """
+
+    async def _side(column: str) -> list[dict[str, Any]]:
+        other = "requester_id" if column == "addressee_id" else "addressee_id"
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT u.public_id,
+                               NULLIF(TRIM(u.first_name || ' ' || u.last_name), '') AS display_name,
+                               u.avatar_url, p.headline, r.message, r.created_at
+                          FROM public.connection_requests r
+                          JOIN public.users u ON u.id = r.{other}
+                          LEFT JOIN public.user_profiles p ON p.user_id = u.id
+                         WHERE r.{column} = :viewer AND r.status = 'PENDING'
+                         ORDER BY r.created_at DESC
+                        """  # noqa: S608 - column is one of two literals
+                    ),
+                    {"viewer": viewer_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(r) for r in rows]
+
+    return {"incoming": await _side("addressee_id"), "outgoing": await _side("requester_id")}
+
+
 async def block_user(
     conn: AsyncConnection, *, actor_user_id: uuid.UUID, target_public_id: str, request_id: str
 ) -> None:

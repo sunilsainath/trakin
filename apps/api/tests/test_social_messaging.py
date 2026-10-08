@@ -572,3 +572,99 @@ async def test_company_post_without_company_context_is_rejected(conn, skeleton, 
             ip_address=None,
             payload={"content": "Nowhere to publish.", "as_company": True},
         )
+
+
+# =============================================================================
+# connection requests: incoming, outgoing, accept, decline
+# =============================================================================
+async def test_connection_requests_split_by_direction(conn, skeleton, tenants) -> None:
+    from app.services import social
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    await social.send_request(
+        conn,
+        actor_user_id=admin.user_id,
+        target_public_id=worker.user_public_id,
+        request_id="pytest",
+        message="Let's connect.",
+    )
+    incoming = await social.list_requests(conn, viewer_id=worker.user_id)
+    assert [r["public_id"] for r in incoming["incoming"]] == [admin.user_public_id]
+    assert incoming["outgoing"] == []
+
+    outgoing = await social.list_requests(conn, viewer_id=admin.user_id)
+    assert [r["public_id"] for r in outgoing["outgoing"]] == [worker.user_public_id]
+    assert outgoing["incoming"] == []
+
+
+async def test_connection_accept_and_decline(conn, skeleton, tenants) -> None:
+    import uuid
+
+    from sqlalchemy import text
+
+    from app.core.security import provision_user
+    from app.services import social
+
+    admin = tenants["admin"]
+    joiner_id = await provision_user(
+        conn,
+        str(uuid.uuid4()),
+        email=f"joiner_{uuid.uuid4().hex[:8]}@t.test",
+        first_name="Joiner",
+        verified=True,
+    )
+    joiner_public_id = (
+        await conn.execute(
+            text("SELECT public_id FROM public.users WHERE id = :uid"),
+            {"uid": joiner_id},
+        )
+    ).scalar_one()
+
+    await social.send_request(
+        conn,
+        actor_user_id=admin.user_id,
+        target_public_id=joiner_public_id,
+        request_id="pytest",
+        message=None,
+    )
+    await social.respond_request(
+        conn,
+        actor_user_id=uuid.UUID(str(joiner_id)),
+        requester_public_id=admin.user_public_id,
+        request_id="pytest",
+        accept=True,
+    )
+    directory = await social.list_connections(conn, viewer_id=admin.user_id, limit=10)
+    assert joiner_public_id in {row["public_id"] for row in directory}
+    pending = await social.list_requests(conn, viewer_id=uuid.UUID(str(joiner_id)))
+    assert pending["incoming"] == []
+
+    stranger_id = await provision_user(
+        conn,
+        str(uuid.uuid4()),
+        email=f"stranger_{uuid.uuid4().hex[:8]}@t.test",
+        first_name="Stranger",
+        verified=True,
+    )
+    stranger_public_id = (
+        await conn.execute(
+            text("SELECT public_id FROM public.users WHERE id = :uid"),
+            {"uid": stranger_id},
+        )
+    ).scalar_one()
+    await social.send_request(
+        conn,
+        actor_user_id=admin.user_id,
+        target_public_id=stranger_public_id,
+        request_id="pytest",
+        message=None,
+    )
+    await social.respond_request(
+        conn,
+        actor_user_id=uuid.UUID(str(stranger_id)),
+        requester_public_id=admin.user_public_id,
+        request_id="pytest",
+        accept=False,
+    )
+    directory = await social.list_connections(conn, viewer_id=admin.user_id, limit=10)
+    assert str(stranger_public_id) not in {row["public_id"] for row in directory}

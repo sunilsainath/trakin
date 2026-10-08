@@ -177,6 +177,14 @@ async def list_connections(
     return {"data": rows, "request_id": ctx.request_id}
 
 
+@router.get("/connections/requests", summary="Pending connection requests")
+async def list_requests(ctx_and_conn: ConnectionsRead) -> dict[str, Any]:
+    """Incoming requests to answer and outgoing requests awaiting the other side."""
+    ctx, conn = ctx_and_conn
+    rows = await social_service.list_requests(conn, viewer_id=ctx.user_id)
+    return {**rows, "request_id": ctx.request_id}
+
+
 @router.post("/connections/requests", status_code=201, summary="Send a connection request")
 async def send_request(ctx_and_conn: ConnectionsWrite, payload: dict[str, Any]) -> dict[str, Any]:
     ctx, conn = ctx_and_conn

@@ -77,3 +77,16 @@ fake), remember-me checkbox (sessions already persist 30 days; a checkbox
 would be fake), cross-party invoice inbox, "Active (to be paid)" as a
 separate status (APPROVED covers it), billing-frequency period enforcement
 (periods stay caller-chosen).
+
+## Module-map round (business branch)
+
+The workspace rail hid most modules from company-less users (Feed, Overview,
+Work, AI only), contradicting the product module map. The rail now lists the
+full map 1:1 — Feed, Work, Business, Code (Overview/Projects/SOW/Contracts),
+Payments, AI, Messages, Connections, Notifications, Profile, Logout — for
+every signed-in user: company modules render their own empty and permission
+states, and the API still enforces everything. Added the missing Connections
+page (incoming/outgoing requests with accept/decline, connection list with
+remove, connect by user ID) plus `GET /connections/requests`, and pointed
+the header Connections link at it. E2E now asserts all nine module routes
+render without a company (19 specs green).

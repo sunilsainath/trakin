@@ -41,7 +41,8 @@ import { NAV_SECTIONS } from '@/components/navigation'
  * Layout (per product spec):
  *
  *   HEADER:  Search | Connections | Messenger | Notifications | Profile
- *   LEFT:    Work | Business | Contracts | Payments | AI | Logout (modules)
+ *   LEFT:    Feed | Work | Business | Code | Payments | AI | Messages |
+ *            Connections | Notifications | Profile | Logout (modules)
  *   CENTER:  page content (the feed on /network)
  *   RIGHT:   page-owned sidebars (Add Centre, suggestions on /network)
  *
@@ -131,7 +132,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="flex-1" />
 
-        <HeaderLink href="/network" label="Connections" active={pathname.startsWith('/network')}>
+        <HeaderLink href="/connections" label="Connections" active={pathname.startsWith('/connections')}>
           <Users />
         </HeaderLink>
         <HeaderLink
@@ -362,10 +363,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 /**
  * Module rail.
  *
- * CODE (Projects → SOW → Contracts → Invoices) is the commercial spine and gets
- * its own section with status deep-links; every link lands on a list the API
- * can actually filter, so no entry is decorative. Children render only for
- * permissions the caller holds.
+ * The rail mirrors the product module map 1:1 — Feed, Work, Business, Code
+ * (Overview/Projects/SOW/Contracts), Payments, AI, Messages, Connections,
+ * Notifications, Profile, Logout — for every signed-in user, company or
+ * not. Company modules render their own empty and permission states when
+ * there is nothing to show, so a visible link is a courtesy rather than
+ * the control; the API still re-checks every permission.
+ *
+ * CODE (Projects → SOW → Contracts → Invoices) is the commercial spine and
+ * gets status deep-links; every link lands on a list the API can actually
+ * filter, so no entry is decorative.
  */
 interface RailChild {
   href: string
@@ -391,7 +398,6 @@ const RAIL: RailSection[] = [
         href: '/projects',
         label: 'Projects',
         icon: <FolderKanban aria-hidden />,
-        permission: 'projects.read',
         children: [
           { href: '/projects', label: 'All Projects' },
           { href: '/projects?status=ACTIVE', label: 'Active' },
@@ -402,7 +408,6 @@ const RAIL: RailSection[] = [
         href: '/sows',
         label: 'SOW',
         icon: <FileSignature aria-hidden />,
-        permission: 'sows.read',
         children: [
           { href: '/sows', label: 'All' },
           { href: '/sows?status=ACTIVE', label: 'Active' },
@@ -416,7 +421,6 @@ const RAIL: RailSection[] = [
         href: '/contracts',
         label: 'Contracts',
         icon: <FileText aria-hidden />,
-        permission: 'contracts.read',
         children: [
           { href: '/contracts', label: 'All Contracts' },
           { href: '/contracts?status=ACTIVE', label: 'Active' },
@@ -434,7 +438,6 @@ const RAIL: RailSection[] = [
         href: '/invoices',
         label: 'Invoices',
         icon: <Receipt aria-hidden />,
-        permission: 'invoices.read',
         children: [
           { href: '/invoices', label: 'All' },
           { href: '/invoices?status=DRAFT', label: 'Draft' },
@@ -450,20 +453,22 @@ const RAIL: RailSection[] = [
     label: 'Workspace',
     items: [
       { href: '/time', label: 'Work', icon: <Briefcase aria-hidden /> },
-      {
-        href: '/companies',
-        label: 'Business',
-        icon: <Building2 aria-hidden />,
-        permission: 'companies.read',
-      },
-      {
-        href: '/payments',
-        label: 'Payments',
-        icon: <Wallet aria-hidden />,
-        permission: 'payments.read',
-      },
+      { href: '/companies', label: 'Business', icon: <Building2 aria-hidden /> },
+      { href: '/payments', label: 'Payments', icon: <Wallet aria-hidden /> },
       { href: '/assistant', label: 'AI', icon: <Sparkles aria-hidden /> },
     ],
+  },
+  {
+    label: 'Connect',
+    items: [
+      { href: '/messages', label: 'Messages', icon: <MessageCircle aria-hidden /> },
+      { href: '/connections', label: 'Connections', icon: <Users aria-hidden /> },
+      { href: '/notifications', label: 'Notifications', icon: <Bell aria-hidden /> },
+    ],
+  },
+  {
+    label: null,
+    items: [{ href: '/settings/profile', label: 'Profile', icon: <UserIcon aria-hidden /> }],
   },
 ]
 
