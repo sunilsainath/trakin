@@ -179,61 +179,73 @@ async def upload_w9_intake(
         storage_path, content, {"content-type": content_type, "upsert": "false"}
     )
 
-    created = (
-        (
+    try:
+        created = (
+            (
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO public.documents
+                          (company_id, owner_user_id, doc_type, title, description,
+                           visibility, status, checksum_sha256)
+                        VALUES (NULL, :actor, 'W9', :title, 'W-9 intake for company founding',
+                                'PRIVATE', 'PROCESSING', :checksum)
+                        RETURNING id, public_id
+                        """
+                    ),
+                    {"actor": founder_user_id, "title": file_name or "W-9", "checksum": checksum},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        public_id, document_id = str(created["public_id"]), created["id"]
+        version_id = (
             await conn.execute(
                 text(
                     """
-                    INSERT INTO public.documents
-                      (company_id, owner_user_id, doc_type, title, description,
-                       visibility, status, checksum_sha256)
-                    VALUES (NULL, :actor, 'W9', :title, 'W-9 intake for company founding',
-                            'PRIVATE', 'PROCESSING', :checksum)
-                    RETURNING id, public_id
+                    INSERT INTO public.document_versions
+                      (document_id, version_no, storage_bucket, file_name, mime_type,
+                       byte_size, storage_path, checksum_sha256, uploaded_by)
+                    VALUES (CAST(:did AS uuid), 1, :bucket, :file_name, :content_type, :size,
+                            :storage_path, :checksum, :actor)
+                    RETURNING id
                     """
                 ),
-                {"actor": founder_user_id, "title": file_name or "W-9", "checksum": checksum},
+                {
+                    "did": document_id,
+                    "bucket": storage_bucket,
+                    "file_name": file_name or "w9.pdf",
+                    "content_type": declared,
+                    "size": len(content),
+                    "storage_path": storage_path,
+                    "checksum": checksum,
+                    "actor": founder_user_id,
+                },
             )
+        ).scalar_one()
+        await document_pipeline.enqueue_processing(conn, version_id=version_id, company_id=None)
+        await audit.record(
+            conn,
+            action="document.w9_intake_uploaded",
+            resource_type="document",
+            resource_id=document_id,
+            resource_public_id=str(public_id),
+            actor_user_id=founder_user_id,
+            request_id=request_id,
+            ip_address=ip_address,
         )
-        .mappings()
-        .first()
-    )
-    public_id, document_id = str(created["public_id"]), created["id"]
-    version_id = (
-        await conn.execute(
-            text(
-                """
-                INSERT INTO public.document_versions
-                  (document_id, version_no, storage_bucket, file_name, mime_type,
-                   byte_size, storage_path, checksum_sha256, uploaded_by)
-                VALUES (CAST(:did AS uuid), 1, :bucket, :file_name, :content_type, :size,
-                        :storage_path, :checksum, :actor)
-                RETURNING id
-                """
-            ),
-            {
-                "did": document_id,
-                "bucket": storage_bucket,
-                "file_name": file_name or "w9.pdf",
-                "content_type": declared,
-                "size": len(content),
-                "storage_path": storage_path,
-                "checksum": checksum,
-                "actor": founder_user_id,
-            },
-        )
-    ).scalar_one()
-    await document_pipeline.enqueue_processing(conn, version_id=version_id, company_id=None)
-    await audit.record(
-        conn,
-        action="document.w9_intake_uploaded",
-        resource_type="document",
-        resource_id=document_id,
-        resource_public_id=str(public_id),
-        actor_user_id=founder_user_id,
-        request_id=request_id,
-        ip_address=ip_address,
-    )
+    except Exception:
+        # The database work rolls back with the request transaction, but the
+        # storage object does not: remove it best-effort so a failed intake
+        # leaves no orphaned file behind. The original error propagates.
+        try:
+            await client.storage.from_(bucket).remove([storage_path])
+        except Exception as cleanup_exc:  # noqa: BLE001 - original error wins
+            logger.warning(
+                "w9_intake_cleanup_failed", path=storage_path, error=str(cleanup_exc)[:200]
+            )
+        raise
     return {"public_id": str(public_id), "status": "PROCESSING", "request_id": request_id}
 
 

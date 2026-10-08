@@ -2087,3 +2087,89 @@ async def test_sow_with_generation_disabled_creates_no_contract(conn, skeleton, 
     assert active["status"] == "ACTIVE"
     assert active["contract_count"] == 0
     assert active["contract_ids"] == []
+
+
+# =============================================================================
+# founding W-9 intake + claim
+# =============================================================================
+async def _intake_w9(conn, owner_user_id) -> str:
+    """An unclaimed founder W-9 row, exactly as upload_w9_intake leaves it."""
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.documents
+                      (company_id, owner_user_id, doc_type, title, visibility,
+                       status, checksum_sha256)
+                    VALUES (NULL, CAST(:owner AS uuid), 'W9', 'Founder W-9',
+                            'PRIVATE', 'PROCESSING', :checksum)
+                    RETURNING public_id
+                    """
+                ),
+                {"owner": owner_user_id, "checksum": "ab" * 32},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    assert row is not None
+    return str(row["public_id"])
+
+
+async def _found_company(conn, tenants, founder_key: str, w9_public_id: str) -> dict[str, Any]:
+    """Found a company on an intake W-9 through the real service."""
+    from app.services import companies
+
+    founder = tenants[founder_key]
+    return await companies.create_company(
+        conn,
+        founder_user_id=founder.user_id,
+        request_id="flow",
+        ip_address=None,
+        payload={
+            "legal_name": f"Claim Co {w9_public_id}",
+            "display_name": "ClaimCo",
+            "country_code": "US",
+            "default_currency": "USD",
+            "w9_document_public_id": w9_public_id,
+        },
+    )
+
+
+async def test_company_creation_claims_the_founders_intake_w9(conn, tenants) -> None:
+    """The intake W-9 moves into the new company in the same transaction."""
+    tenant = tenants["admin"]
+    w9 = await _intake_w9(conn, tenant.user_id)
+
+    company = await _found_company(conn, tenants, "admin", w9)
+    assert company["public_id"].startswith("CO")
+
+    owner = (
+        await conn.execute(
+            text(
+                """
+                SELECT c.public_id FROM public.documents d
+                  JOIN public.companies c ON c.id = d.company_id
+                 WHERE d.public_id = :pid
+                """
+            ),
+            {"pid": w9},
+        )
+    ).scalar_one()
+    assert owner == company["public_id"]
+
+
+async def test_company_creation_rejects_another_founders_w9(conn, tenants) -> None:
+    """A W-9 belonging to someone else is indistinguishable from a missing one."""
+    w9 = await _intake_w9(conn, tenants["worker"].user_id)
+    with pytest.raises(ResourceNotFoundError):
+        await _found_company(conn, tenants, "admin", w9)
+
+
+async def test_company_creation_rejects_an_already_claimed_w9(conn, tenants) -> None:
+    """One intake W-9 founds exactly one company; it cannot be borrowed twice."""
+    w9 = await _intake_w9(conn, tenants["admin"].user_id)
+    await _found_company(conn, tenants, "admin", w9)
+    with pytest.raises(ResourceNotFoundError):
+        await _found_company(conn, tenants, "admin", w9)

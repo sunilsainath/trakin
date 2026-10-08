@@ -185,8 +185,13 @@ async def process_version(conn: AsyncConnection, *, version_id: uuid.UUID) -> di
 
 
 async def _download(
-    conn: AsyncConnection, storage_path: str | None, company_id: uuid.UUID
+    conn: AsyncConnection, storage_path: str | None, company_id: uuid.UUID | None
 ) -> bytes | None:
+    """Fetch one object from the private bucket.
+
+    `company_id` is informational only (the path already scopes the object);
+    it is None for pre-claim intake uploads, which download exactly the same.
+    """
     if not storage_path:
         return None
     from app.services.documents import _storage
