@@ -36,29 +36,33 @@ interface SuggestionsResponse {
  * removes the person from the list, because a pending request excludes them
  * server-side on the next fetch.
  */
-export function RightRail() {
+export function RightRail({ companyPublicId }: { companyPublicId: string | null }) {
   const [suggestions, setSuggestions] = React.useState<SuggestionsResponse | null>(null)
   const [error, setError] = React.useState<unknown>(null)
   const [connecting, setConnecting] = React.useState<string | null>(null)
 
   const load = React.useCallback(async () => {
+    if (!companyPublicId) return
     try {
       setError(null)
-      const rows = await api.get<SuggestionsResponse>('/connections/suggestions')
+      const rows = await api.get<SuggestionsResponse>('/connections/suggestions', {
+        companyPublicId,
+      })
       setSuggestions(rows)
     } catch (cause) {
       setError(cause)
     }
-  }, [])
+  }, [companyPublicId])
 
   React.useEffect(() => {
     void load()
   }, [load])
 
   const connect = async (userPublicId: string) => {
+    if (!companyPublicId) return
     setConnecting(userPublicId)
     try {
-      await api.post('/connections/requests', { user_id: userPublicId })
+      await api.post('/connections/requests', { user_id: userPublicId }, { companyPublicId })
       notifySuccess('Connection request sent.')
       await load()
     } catch (cause) {
@@ -66,6 +70,15 @@ export function RightRail() {
     } finally {
       setConnecting(null)
     }
+  }
+
+  if (!companyPublicId) {
+    return (
+      <EmptyState
+        title="Select a company to continue"
+        description="Suggestions load in a company context. Pick one in the header to meet your network."
+      />
+    )
   }
 
   if (error) {

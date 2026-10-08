@@ -89,7 +89,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-dvh bg-background">
       {/* Skip link target */}
-      <div id="main" className="flex-1">
+      <div id="main" className="flex min-w-0 flex-1">
         {/* ------------------------------------------------------------ */}
         {/* Left rail                                                      */}
         {/* ------------------------------------------------------------ */}

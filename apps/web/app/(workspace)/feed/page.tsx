@@ -34,7 +34,7 @@ const MODULES = [
  * professional graph. Nothing here is mock content.
  */
 export default function FeedPage() {
-  const { me } = useCompany()
+  const { me, activeCompanyPublicId } = useCompany()
 
   const signOut = async () => {
     await getSupabase().auth.signOut()
@@ -76,11 +76,14 @@ export default function FeedPage() {
         </Card>
 
         <div className="min-w-0 max-lg:order-1">
-          <ProfessionalFeed mePublicId={me?.public_id ?? null} />
+          <ProfessionalFeed
+            mePublicId={me?.public_id ?? null}
+            companyPublicId={activeCompanyPublicId}
+          />
         </div>
 
         <div className="min-w-0 max-lg:order-3">
-          <RightRail />
+          <RightRail companyPublicId={activeCompanyPublicId} />
         </div>
       </div>
     </PageShell>

@@ -51,23 +51,41 @@ const REACTIONS = ['LIKE', 'CELEBRATE', 'INSIGHTFUL'] as const
  * comments, shares). Visibility is enforced server-side, so this component
  * never filters rows itself.
  */
-export function ProfessionalFeed({ mePublicId }: { mePublicId: string | null }) {
+export function ProfessionalFeed({
+  mePublicId,
+  companyPublicId,
+}: {
+  mePublicId: string | null
+  companyPublicId: string | null
+}) {
   const [posts, setPosts] = React.useState<FeedPost[] | null>(null)
   const [error, setError] = React.useState<unknown>(null)
 
   const load = React.useCallback(async () => {
+    if (!companyPublicId) return
     try {
       setError(null)
-      const feed = await api.get<{ data: FeedPost[] }>('/posts?limit=25')
+      const feed = await api.get<{ data: FeedPost[] }>('/posts?limit=25', {
+        companyPublicId,
+      })
       setPosts(feed.data)
     } catch (cause) {
       setError(cause)
     }
-  }, [])
+  }, [companyPublicId])
 
   React.useEffect(() => {
     void load()
   }, [load])
+
+  if (!companyPublicId) {
+    return (
+      <EmptyState
+        title="Select a company to continue"
+        description="Your feed loads in a company context. Pick one in the header to see your network's posts."
+      />
+    )
+  }
 
   if (error) {
     return <ErrorState error={error} onRetry={() => void load()} />
@@ -85,7 +103,7 @@ export function ProfessionalFeed({ mePublicId }: { mePublicId: string | null }) 
             defaultValues={{ content: '' }}
             submitLabel="Post"
             onSubmit={async (values) => {
-              await api.post('/posts', { content: values.content })
+              await api.post('/posts', { content: values.content }, { companyPublicId })
               notifySuccess('Posted to your network.')
               await load()
             }}
@@ -104,6 +122,7 @@ export function ProfessionalFeed({ mePublicId }: { mePublicId: string | null }) 
             key={post.public_id}
             post={post}
             mePublicId={mePublicId}
+            companyPublicId={companyPublicId}
             onChanged={() => void load()}
           />
         ))
@@ -115,10 +134,12 @@ export function ProfessionalFeed({ mePublicId }: { mePublicId: string | null }) 
 function PostCard({
   post,
   mePublicId,
+  companyPublicId,
   onChanged,
 }: {
   post: FeedPost
   mePublicId: string | null
+  companyPublicId: string
   onChanged: () => void
 }) {
   const [commentsOpen, setCommentsOpen] = React.useState(false)
@@ -131,12 +152,13 @@ function PostCard({
       setCommentsError(null)
       const rows = await api.get<{ data: FeedComment[] }>(
         `/posts/${post.public_id}/comments?limit=50`,
+        { companyPublicId },
       )
       setComments(rows.data)
     } catch (cause) {
       setCommentsError(cause)
     }
-  }, [post.public_id])
+  }, [post.public_id, companyPublicId])
 
   const toggleComments = () => {
     const next = !commentsOpen
@@ -147,7 +169,7 @@ function PostCard({
   const react = async (reaction: string) => {
     setBusy(true)
     try {
-      await api.post(`/posts/${post.public_id}/reactions`, { reaction })
+      await api.post(`/posts/${post.public_id}/reactions`, { reaction }, { companyPublicId })
       onChanged()
     } catch (cause) {
       notifyError(cause)
@@ -159,7 +181,7 @@ function PostCard({
   const share = async () => {
     setBusy(true)
     try {
-      await api.post(`/posts/${post.public_id}/shares`, {})
+      await api.post(`/posts/${post.public_id}/shares`, {}, { companyPublicId })
       notifySuccess('Shared with your network.')
       onChanged()
     } catch (cause) {
@@ -234,9 +256,13 @@ function PostCard({
               defaultValues={{ content: '' }}
               submitLabel="Comment"
               onSubmit={async (values) => {
-                await api.post(`/posts/${post.public_id}/comments`, {
-                  content: values.content,
-                })
+                await api.post(
+                  `/posts/${post.public_id}/comments`,
+                  {
+                    content: values.content,
+                  },
+                  { companyPublicId },
+                )
                 await loadComments()
                 onChanged()
               }}

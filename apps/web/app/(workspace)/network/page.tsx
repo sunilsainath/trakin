@@ -5,7 +5,7 @@ import * as React from 'react'
 import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
 import { PageHeader, PageShell } from '@/components/page'
-import { Alert, Button, Card, CardContent, CardHeader, CardTitle } from '@/components/ui'
+import { Alert, Button, Card, CardContent, CardHeader, CardTitle, EmptyState } from '@/components/ui'
 import { ErrorState, LoadingBlock } from '@/components/query'
 import { notifyError } from '@/components/toast'
 import { ProfessionalFeed } from '@/components/post-feed'
@@ -17,21 +17,24 @@ interface Connection {
 }
 
 export default function NetworkPage() {
-  const { me } = useCompany()
+  const { me, activeCompanyPublicId } = useCompany()
   const [connections, setConnections] = React.useState<Connection[] | null>(null)
   const [error, setError] = React.useState<unknown>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [invite, setInvite] = React.useState('')
 
   const load = React.useCallback(async () => {
+    if (!activeCompanyPublicId) return
     try {
       setError(null)
-      const directory = await api.get<{ data: Connection[] }>('/connections?limit=100')
+      const directory = await api.get<{ data: Connection[] }>('/connections?limit=100', {
+        companyPublicId: activeCompanyPublicId,
+      })
       setConnections(directory.data)
     } catch (cause) {
       setError(cause)
     }
-  }, [])
+  }, [activeCompanyPublicId])
 
   React.useEffect(() => {
     void load()
@@ -39,15 +42,31 @@ export default function NetworkPage() {
 
   const connect = async () => {
     const target = invite.trim()
-    if (!target) return
+    if (!target || !activeCompanyPublicId) return
     setNotice(null)
     try {
-      await api.post('/connections/requests', { user_id: target })
+      await api.post(
+        '/connections/requests',
+        { user_id: target },
+        { companyPublicId: activeCompanyPublicId },
+      )
       setInvite('')
       setNotice('Connection request sent.')
     } catch (cause) {
       notifyError(cause)
     }
+  }
+
+  if (!activeCompanyPublicId) {
+    return (
+      <PageShell>
+        <PageHeader title="Network" description="Posts and professional connections." />
+        <EmptyState
+          title="Select a company to continue"
+          description="Your network loads in a company context. Pick one in the header to see posts and connections."
+        />
+      </PageShell>
+    )
   }
 
   return (
@@ -64,7 +83,10 @@ export default function NetworkPage() {
         <LoadingBlock />
       ) : (
         <div className="grid gap-4 lg:grid-cols-[1fr_20rem]">
-          <ProfessionalFeed mePublicId={me?.public_id ?? null} />
+          <ProfessionalFeed
+            mePublicId={me?.public_id ?? null}
+            companyPublicId={activeCompanyPublicId}
+          />
 
           <Card>
             <CardHeader>
