@@ -52,79 +52,265 @@ if not ADMIN_DSN:
 
 API_ROLE = "mytrakin_api"
 
-# Child-before-parent order for teardown. RESTRICT foreign keys on contracts,
-# invoices and payments are intentional: they stop an accidental
-# `DELETE FROM companies` from destroying legal and financial records.
-TEARDOWN_CHILD_FIRST = [
-    "public.payment_allocations",
-    "public.payment_matches",
-    "public.payment_requests",
-    "public.payment_schedules",
-    "public.payments",
-    # public.bank_transactions is intentionally absent: it rejects DELETE for
-    # every role, so it is reset with TRUNCATE below.
-    "public.bank_accounts",
-    "public.bank_connections",
-    "public.payment_accounts",
-    "public.invoice_approvals",
-    "public.invoice_allocations",
-    "public.invoice_items",
-    "public.invoices",
-    "public.billing_runs",
-    "public.timesheet_approvals",
-    "public.timesheet_revisions",
-    "public.timesheet_entries",
-    "public.timesheets",
-    "public.assignments",
-    "public.leave_requests",
-    "public.leave_balances",
-    "public.leave_policies",
-    "public.contract_approval_steps",
-    "public.contract_line_items",
-    "public.contract_roles",
-    "public.contract_parties",
-    "public.contracts",
-    "public.sow_roles",
-    "public.sows",
-    "public.project_roles",
-    "public.projects",
-    "public.msa_requests",
-    "public.msa_versions",
-    "public.msas",
-    "public.document_access_log",
-    "public.document_versions",
-    "public.documents",
-    "public.ai_automation_runs",
-    "public.ai_automations",
-    "public.ai_actions",
-    "public.ai_extractions",
-    "public.ai_document_chunks",
-    "public.ai_knowledge_documents",
-    "public.conversation_members",
-    "public.messages",
-    "public.conversations",
-    "public.post_shares",
-    "public.post_reactions",
-    "public.post_comments",
-    "public.posts",
-    "public.connection_requests",
-    "public.connections",
-    "public.user_blocks",
-    "public.company_invitations",
-    "public.role_permissions",
-    "public.company_memberships",
-    "public.company_roles",
-    "public.companies",
-    "public.user_skills",
-    "public.user_educations",
-    "public.user_experiences",
-    "public.user_certifications",
-    "public.user_privacy",
-    "public.user_sensitive",
-    "public.user_profiles",
-    "public.user_security_flags",
-    "public.users",
-]
+
+# Fixture-scoped teardown predicates. Every test builds its world through the
+# `world` fixture (users) and make_company() (companies), so deleting rows
+# tied to those ids removes exactly the fixture graph and nothing else. This
+# matters because the database is shared with the local demo workspace: the
+# old full-table wipes also deleted live users/companies, and
+# `TRUNCATE bank_transactions CASCADE` cascaded into payments, allocations,
+# matches and requests (see the closure: invoice_allocations, payments,
+# payment_allocations, payment_matches, payment_requests).
+def _teardown_world(admin: psycopg.Connection, cids: list[str], uids: list[str]) -> None:
+    ts = (
+        "(SELECT id FROM public.timesheets WHERE company_id = ANY(%s::uuid[]) "
+        "OR user_id = ANY(%s::uuid[]))"
+    )
+    inv = "(SELECT id FROM public.invoices WHERE company_id = ANY(%s::uuid[]))"
+    pay = "(SELECT id FROM public.payments WHERE company_id = ANY(%s::uuid[]))"
+    con = "(SELECT id FROM public.contracts WHERE company_id = ANY(%s::uuid[]))"
+    sow = "(SELECT id FROM public.sows WHERE company_id = ANY(%s::uuid[]))"
+    msa = (
+        "(SELECT id FROM public.msas WHERE company_a_id = ANY(%s::uuid[]) "
+        "OR company_b_id = ANY(%s::uuid[]))"
+    )
+    doc = (
+        "(SELECT id FROM public.documents WHERE company_id = ANY(%s::uuid[]) "
+        "OR owner_user_id = ANY(%s::uuid[]))"
+    )
+    post = (
+        "(SELECT id FROM public.posts WHERE author_id = ANY(%s::uuid[]) "
+        "OR company_id = ANY(%s::uuid[]))"
+    )
+    convo = (
+        "(SELECT id FROM public.conversations "
+        "WHERE created_by = ANY(%s::uuid[]) OR company_id = ANY(%s::uuid[]))"
+    )
+    role = "(SELECT id FROM public.company_roles WHERE company_id = ANY(%s::uuid[]))"
+    btx = "(SELECT id FROM public.bank_transactions WHERE company_id = ANY(%s::uuid[]))"
+
+    deletes: list[tuple[str, tuple]] = [
+        (
+            "DELETE FROM public.payment_allocations WHERE payment_id IN "
+            + pay
+            + " OR invoice_id IN "
+            + inv
+            + " OR bank_transaction_id IN "
+            + btx,
+            (cids, cids, cids),
+        ),
+        ("DELETE FROM public.payment_matches WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.payment_requests WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.payment_schedules WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.payments WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.bank_accounts WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (
+            "DELETE FROM public.bank_connections WHERE company_id = ANY(%s::uuid[]) "
+            "OR owner_user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        ("DELETE FROM public.payment_accounts WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (f"DELETE FROM public.invoice_approvals WHERE invoice_id IN {inv}", (cids,)),
+        (
+            f"DELETE FROM public.invoice_allocations WHERE invoice_id IN {inv} "
+            f"OR payment_id IN {pay}",
+            (cids, cids),
+        ),
+        (f"DELETE FROM public.invoice_items WHERE invoice_id IN {inv}", (cids,)),
+        ("DELETE FROM public.invoices WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.billing_runs WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        # Timesheets are handled below (guard triggers disabled transiently).
+        (
+            "DELETE FROM public.assignments WHERE company_id = ANY(%s::uuid[]) "
+            "OR user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        (
+            "DELETE FROM public.leave_requests WHERE company_id = ANY(%s::uuid[]) "
+            "OR user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        (
+            "DELETE FROM public.leave_balances WHERE company_id = ANY(%s::uuid[]) "
+            "OR user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        ("DELETE FROM public.leave_policies WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (f"DELETE FROM public.contract_approval_steps WHERE contract_id IN {con}", (cids,)),
+        (f"DELETE FROM public.contract_line_items WHERE contract_id IN {con}", (cids,)),
+        (f"DELETE FROM public.contract_roles WHERE contract_id IN {con}", (cids,)),
+        (
+            f"DELETE FROM public.contract_parties WHERE contract_id IN {con} "
+            "OR party_company_id = ANY(%s::uuid[]) OR party_user_id = ANY(%s::uuid[])",
+            (cids, cids, uids),
+        ),
+        ("DELETE FROM public.contracts WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (f"DELETE FROM public.sow_roles WHERE sow_id IN {sow}", (cids,)),
+        ("DELETE FROM public.sows WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.project_roles WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.projects WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (
+            "DELETE FROM public.msa_requests WHERE requester_company_id = ANY(%s::uuid[]) "
+            f"OR target_company_id = ANY(%s::uuid[]) OR msa_id IN {msa}",
+            (cids, cids, cids, cids),
+        ),
+        (f"DELETE FROM public.msa_versions WHERE msa_id IN {msa}", (cids, cids)),
+        (
+            "DELETE FROM public.msas WHERE company_a_id = ANY(%s::uuid[]) "
+            "OR company_b_id = ANY(%s::uuid[])",
+            (cids, cids),
+        ),
+        (
+            "DELETE FROM public.document_access_log WHERE company_id = ANY(%s::uuid[]) "
+            f"OR user_id = ANY(%s::uuid[]) OR document_id IN {doc}",
+            (cids, uids, cids, uids),
+        ),
+        (f"DELETE FROM public.document_versions WHERE document_id IN {doc}", (cids, uids)),
+        (
+            "DELETE FROM public.documents WHERE company_id = ANY(%s::uuid[]) "
+            "OR owner_user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        ("DELETE FROM public.ai_automation_runs WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.ai_automations WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.ai_actions WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (
+            "DELETE FROM public.ai_extractions WHERE company_id = ANY(%s::uuid[]) "
+            "OR user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        ("DELETE FROM public.ai_document_chunks WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.ai_knowledge_documents WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (
+            "DELETE FROM public.conversation_members WHERE user_id = ANY(%s::uuid[]) "
+            f"OR conversation_id IN {convo}",
+            (uids, uids, cids),
+        ),
+        (
+            "DELETE FROM public.messages WHERE sender_id = ANY(%s::uuid[]) "
+            f"OR conversation_id IN {convo}",
+            (uids, uids, cids),
+        ),
+        (
+            "DELETE FROM public.conversations WHERE created_by = ANY(%s::uuid[]) "
+            "OR company_id = ANY(%s::uuid[])",
+            (uids, cids),
+        ),
+        (
+            "DELETE FROM public.post_shares WHERE user_id = ANY(%s::uuid[]) "
+            f"OR company_id = ANY(%s::uuid[]) OR post_id IN {post}",
+            (uids, cids, uids, cids),
+        ),
+        (
+            "DELETE FROM public.post_reactions WHERE user_id = ANY(%s::uuid[]) "
+            f"OR post_id IN {post}",
+            (uids, uids, cids),
+        ),
+        (
+            "DELETE FROM public.post_comments WHERE author_id = ANY(%s::uuid[]) "
+            f"OR post_id IN {post}",
+            (uids, uids, cids),
+        ),
+        (
+            "DELETE FROM public.posts WHERE author_id = ANY(%s::uuid[]) "
+            "OR company_id = ANY(%s::uuid[])",
+            (uids, cids),
+        ),
+        (
+            "DELETE FROM public.connection_requests WHERE requester_id = ANY(%s::uuid[]) "
+            "OR addressee_id = ANY(%s::uuid[])",
+            (uids, uids),
+        ),
+        (
+            "DELETE FROM public.connections WHERE requester_id = ANY(%s::uuid[]) "
+            "OR addressee_id = ANY(%s::uuid[])",
+            (uids, uids),
+        ),
+        (
+            "DELETE FROM public.user_blocks WHERE blocker_id = ANY(%s::uuid[]) "
+            "OR blocked_id = ANY(%s::uuid[])",
+            (uids, uids),
+        ),
+        ("DELETE FROM public.company_invitations WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (f"DELETE FROM public.role_permissions WHERE role_id IN {role}", (cids,)),
+        (
+            "DELETE FROM public.company_memberships WHERE company_id = ANY(%s::uuid[]) "
+            "OR user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        ("DELETE FROM public.company_roles WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.companies WHERE id = ANY(%s::uuid[])", (cids,)),
+        ("DELETE FROM public.user_skills WHERE user_id = ANY(%s::uuid[])", (uids,)),
+        ("DELETE FROM public.user_educations WHERE user_id = ANY(%s::uuid[])", (uids,)),
+        ("DELETE FROM public.user_experiences WHERE user_id = ANY(%s::uuid[])", (uids,)),
+        ("DELETE FROM public.user_certifications WHERE user_id = ANY(%s::uuid[])", (uids,)),
+        ("DELETE FROM public.user_privacy WHERE user_id = ANY(%s::uuid[])", (uids,)),
+        ("DELETE FROM public.user_sensitive WHERE user_id = ANY(%s::uuid[])", (uids,)),
+        ("DELETE FROM public.user_profiles WHERE user_id = ANY(%s::uuid[])", (uids,)),
+        ("DELETE FROM public.user_security_flags WHERE user_id = ANY(%s::uuid[])", (uids,)),
+    ]
+
+    # Append-only ledgers and locked timesheets refuse DELETE for every role,
+    # so their guard triggers are disabled transiently (admin owns the
+    # tables) around a fixture-scoped delete. DISABLE TRIGGER <named> leaves
+    # FK constraint triggers active; everything is re-enabled in `finally`.
+    guarded: list[tuple[str, tuple]] = [
+        ("DELETE FROM public.bank_transactions WHERE company_id = ANY(%s::uuid[])", (cids,)),
+        (
+            "DELETE FROM platform.audit_logs WHERE company_id = ANY(%s::uuid[]) "
+            "OR actor_user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+        (f"DELETE FROM public.timesheet_entries WHERE timesheet_id IN {ts}", (cids, uids)),
+        (f"DELETE FROM public.timesheet_revisions WHERE timesheet_id IN {ts}", (cids, uids)),
+        (f"DELETE FROM public.timesheet_approvals WHERE timesheet_id IN {ts}", (cids, uids)),
+        (
+            "DELETE FROM public.timesheets WHERE company_id = ANY(%s::uuid[]) "
+            "OR user_id = ANY(%s::uuid[])",
+            (cids, uids),
+        ),
+    ]
+    with admin.transaction():
+        admin.execute(
+            "ALTER TABLE public.bank_transactions DISABLE TRIGGER trg_txn_10_ledger_facts"
+        )
+        admin.execute("ALTER TABLE platform.audit_logs DISABLE TRIGGER trg_audit_immutable")
+        admin.execute(
+            "ALTER TABLE public.timesheet_entries DISABLE TRIGGER trg_entries_timesheet_editable"
+        )
+        admin.execute(
+            "ALTER TABLE public.timesheet_entries DISABLE TRIGGER trg_entries_capture_revision"
+        )
+        admin.execute(
+            "ALTER TABLE public.timesheet_revisions DISABLE TRIGGER trg_revisions_immutable"
+        )
+    try:
+        for sql, params in guarded:
+            with admin.transaction():
+                admin.execute(sql, params)
+    finally:
+        with admin.transaction():
+            admin.execute(
+                "ALTER TABLE public.bank_transactions ENABLE TRIGGER trg_txn_10_ledger_facts"
+            )
+            admin.execute("ALTER TABLE platform.audit_logs ENABLE TRIGGER trg_audit_immutable")
+            admin.execute(
+                "ALTER TABLE public.timesheet_entries ENABLE TRIGGER trg_entries_timesheet_editable"
+            )
+            admin.execute(
+                "ALTER TABLE public.timesheet_entries ENABLE TRIGGER trg_entries_capture_revision"
+            )
+            admin.execute(
+                "ALTER TABLE public.timesheet_revisions ENABLE TRIGGER trg_revisions_immutable"
+            )
+
+    for sql, params in deletes:
+        with admin.transaction():
+            admin.execute(sql, params)
+
+    with admin.transaction():
+        admin.execute("DELETE FROM public.users WHERE id = ANY(%s::uuid[])", (uids,))
+
 
 # Tests impersonate mytrakin_api so RLS is genuinely enforced rather than
 # bypassed by a superuser session. The role is granted to the session in the
@@ -200,34 +386,15 @@ def world(admin: psycopg.Connection) -> Iterator[World]:
     try:
         yield w
     finally:
-        # Several tables deliberately use ON DELETE RESTRICT (contracts, invoices,
-        # payments are legal/financial artefacts), so teardown walks the graph in
-        # dependency order. See scripts/cleanup_test_data.py for the same list.
-        # Reset the append-only ledgers first: deleting a bank_account cascades to
-        # bank_transactions, whose BEFORE DELETE trigger refuses the cascade.
-        for table in ("public.bank_transactions", "platform.audit_logs"):
-            with admin.transaction():
-                admin.execute(f"TRUNCATE {table} CASCADE")
-
-        # Teardown must remove rows from LOCKED timesheets, which the (now
-        # correct) app.assert_timesheet_editable() guard refuses to DELETE for
-        # ordinary users -- exactly what T9 proves. TRUNCATE fires no row
-        # triggers, so it removes those rows without tripping the guard; the
-        # DELETE loop below then handles everything else in dependency order.
-        # (SET LOCAL app.actor_type='SYSTEM' would also bypass the guard, but
-        # the Supabase transaction pooler does not reliably preserve GUCs.)
-        with admin.transaction():
-            admin.execute(
-                "TRUNCATE public.timesheet_entries, public.timesheet_revisions,"
-                " public.timesheet_approvals, public.timesheets CASCADE"
-            )
-        for table in TEARDOWN_CHILD_FIRST:
-            with admin.transaction():
-                admin.execute(f"DELETE FROM {table}")
-
-        with admin.transaction():
-            for actor in w.users.values():
-                admin.execute("DELETE FROM public.users WHERE id = %s", (actor.user_id,))
+        # Scoped teardown: delete ONLY this fixture's rows. The database is
+        # shared with the local demo workspace, so full-table wipes here
+        # used to destroy live users/companies (breaking local login) and
+        # `TRUNCATE bank_transactions CASCADE` cascaded into payments,
+        # allocations, matches and requests.
+        cids = [str(c) for c in w.companies.values()]
+        uids = [str(a.user_id) for a in w.users.values()]
+        if cids or uids:
+            _teardown_world(admin, cids, uids)
 
 
 @contextmanager
