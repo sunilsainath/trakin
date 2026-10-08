@@ -361,7 +361,13 @@ export default function ProjectsPage() {
 function ProjectsList() {
   const { activeCompanyPublicId } = useCompany()
 
-  const [status, setStatus] = React.useState('')
+  // Deep links (e.g. /projects?status=ACTIVE from the CODE rail) initialize
+  // the filter; anything unrecognized is ignored rather than sent to the API.
+  const [status, setStatus] = React.useState(() => {
+    if (typeof window === 'undefined') return ''
+    const initial = new URLSearchParams(window.location.search).get('status') ?? ''
+    return (PROJECT_STATUSES as readonly string[]).includes(initial) ? initial : ''
+  })
   const [search, setSearch] = React.useState('')
   const debouncedSearch = useDebouncedValue(search.trim())
   const [sort, setSort] = React.useState<{ key: string; direction: 'asc' | 'desc' } | null>(null)

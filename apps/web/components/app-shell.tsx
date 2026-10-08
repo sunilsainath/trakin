@@ -9,11 +9,15 @@ import {
   Check,
   ChevronDown,
   FileSignature,
+  FileText,
+  FolderKanban,
   Home,
+  LayoutDashboard,
   LogOut,
   Menu,
   MessageCircle,
   Moon,
+  Receipt,
   Search,
   Settings,
   Sparkles,
@@ -48,7 +52,7 @@ import { NAV_SECTIONS } from '@/components/navigation'
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const { me, unread, refreshUnread, companies, loading } = useCompany()
+  const { me, unread, refreshUnread, companies, loading, can } = useCompany()
 
   // Badge nudge: realtime INSERTs refresh counts immediately; the 60s poll in
   // useCompany remains the source of truth. RLS scopes delivery to own rows.
@@ -242,34 +246,64 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           ) : null}
 
-          <nav aria-label="Modules" className="flex-1 space-y-0.5 overflow-y-auto p-3 scrollbar-thin">
-            {MODULES.map((item) => {
-              const active =
-                item.href === '/network'
-                  ? pathname === '/network'
-                  : pathname === item.href || pathname.startsWith(`${item.href}/`)
+          <nav aria-label="Modules" className="flex-1 space-y-4 overflow-y-auto p-3 scrollbar-thin">
+            {RAIL.map((section, index) => {
+              const items = section.items.filter((item) => !item.permission || can(item.permission))
+              if (items.length === 0) return null
               return (
-                <a
-                  key={item.href}
-                  href={item.href}
-                  aria-current={active ? 'page' : undefined}
-                  className={cn(
-                    'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                    active
-                      ? 'bg-primary-soft text-primary-strong'
-                      : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-                  )}
-                >
-                  <span
-                    className={cn(
-                      '[&_svg]:size-4',
-                      active ? 'text-primary' : 'text-muted-foreground',
-                    )}
-                  >
-                    {item.icon}
-                  </span>
-                  {item.label}
-                </a>
+                <div key={section.label ?? `section-${index}`}>
+                  {section.label ? (
+                    <p className="px-3 pb-1.5 text-2xs font-semibold uppercase tracking-wider text-subtle-foreground">
+                      {section.label}
+                    </p>
+                  ) : null}
+                  <div className="space-y-0.5">
+                    {items.map((item) => {
+                      const active =
+                        pathname === item.href || pathname.startsWith(`${item.href}/`)
+                      const children = (item.children ?? []).filter(
+                        (child) => !child.permission || can(child.permission),
+                      )
+                      return (
+                        <div key={item.href}>
+                          <a
+                            href={item.href}
+                            aria-current={active ? 'page' : undefined}
+                            className={cn(
+                              'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                              active
+                                ? 'bg-primary-soft text-primary-strong'
+                                : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                '[&_svg]:size-4',
+                                active ? 'text-primary' : 'text-muted-foreground',
+                              )}
+                            >
+                              {item.icon}
+                            </span>
+                            {item.label}
+                          </a>
+                          {children.length > 0 ? (
+                            <div className="ml-6 space-y-0.5 border-l border-border pl-2">
+                              {children.map((child) => (
+                                <a
+                                  key={child.href}
+                                  href={child.href}
+                                  className="block truncate rounded-md px-2 py-1 text-[13px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                                >
+                                  {child.label}
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
               )
             })}
           </nav>
@@ -325,14 +359,112 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   )
 }
 
-/** Module rail: Work | Business | Contracts | Payments | AI (+ Feed home). */
-const MODULES: { href: string; label: string; icon: React.ReactNode }[] = [
-  { href: '/network', label: 'Feed', icon: <Home aria-hidden /> },
-  { href: '/time', label: 'Work', icon: <Briefcase aria-hidden /> },
-  { href: '/companies', label: 'Business', icon: <Building2 aria-hidden /> },
-  { href: '/contracts', label: 'Contracts', icon: <FileSignature aria-hidden /> },
-  { href: '/payments', label: 'Payments', icon: <Wallet aria-hidden /> },
-  { href: '/assistant', label: 'AI', icon: <Sparkles aria-hidden /> },
+/**
+ * Module rail.
+ *
+ * CODE (Projects → SOW → Contracts → Invoices) is the commercial spine and gets
+ * its own section with status deep-links; every link lands on a list the API
+ * can actually filter, so no entry is decorative. Children render only for
+ * permissions the caller holds.
+ */
+interface RailChild {
+  href: string
+  label: string
+  permission?: string
+}
+
+interface RailSection {
+  label: string | null
+  items: (RailChild & { icon: React.ReactNode; children?: RailChild[] })[]
+}
+
+const RAIL: RailSection[] = [
+  {
+    label: null,
+    items: [{ href: '/network', label: 'Feed', icon: <Home aria-hidden /> }],
+  },
+  {
+    label: 'CODE',
+    items: [
+      { href: '/code', label: 'Overview', icon: <LayoutDashboard aria-hidden /> },
+      {
+        href: '/projects',
+        label: 'Projects',
+        icon: <FolderKanban aria-hidden />,
+        permission: 'projects.read',
+        children: [
+          { href: '/projects', label: 'All Projects' },
+          { href: '/projects?status=ACTIVE', label: 'Active' },
+          { href: '/projects?status=DRAFT', label: 'Drafts' },
+        ],
+      },
+      {
+        href: '/sows',
+        label: 'SOW',
+        icon: <FileSignature aria-hidden />,
+        permission: 'sows.read',
+        children: [
+          { href: '/sows', label: 'All' },
+          { href: '/sows?status=ACTIVE', label: 'Active' },
+          { href: '/sows?status=DRAFT', label: 'Draft' },
+          { href: '/sows?status=PENDING_APPROVAL', label: 'Pending' },
+          { href: '/sows?status=REJECTED', label: 'Rejected' },
+          { href: '/sows?status=CLOSED', label: 'Closed' },
+        ],
+      },
+      {
+        href: '/contracts',
+        label: 'Contracts',
+        icon: <FileText aria-hidden />,
+        permission: 'contracts.read',
+        children: [
+          { href: '/contracts', label: 'All Contracts' },
+          { href: '/contracts?status=ACTIVE', label: 'Active' },
+          {
+            href: '/contracts?status=PENDING_ACCEPTANCE',
+            label: 'Pending Acceptance',
+          },
+          { href: '/contracts?status=DRAFT', label: 'Drafts' },
+          { href: '/contracts?expiring_within_days=30', label: 'Expiring' },
+          { href: '/contracts?status=DECLINED', label: 'Rejected' },
+          { href: '/contracts?status=TERMINATED', label: 'Terminated / Closed' },
+        ],
+      },
+      {
+        href: '/invoices',
+        label: 'Invoices',
+        icon: <Receipt aria-hidden />,
+        permission: 'invoices.read',
+        children: [
+          { href: '/invoices', label: 'All' },
+          { href: '/invoices?status=DRAFT', label: 'Draft' },
+          { href: '/invoices?status=PENDING', label: 'Pending' },
+          { href: '/invoices?status=PAID', label: 'Paid' },
+          { href: '/invoices?status=REJECTED', label: 'Rejected' },
+          { href: '/invoices?overdue_only=true', label: 'Overdue' },
+        ],
+      },
+    ],
+  },
+  {
+    label: 'Workspace',
+    items: [
+      { href: '/time', label: 'Work', icon: <Briefcase aria-hidden /> },
+      {
+        href: '/companies',
+        label: 'Business',
+        icon: <Building2 aria-hidden />,
+        permission: 'companies.read',
+      },
+      {
+        href: '/payments',
+        label: 'Payments',
+        icon: <Wallet aria-hidden />,
+        permission: 'payments.read',
+      },
+      { href: '/assistant', label: 'AI', icon: <Sparkles aria-hidden /> },
+    ],
+  },
 ]
 
 function HeaderSearch() {

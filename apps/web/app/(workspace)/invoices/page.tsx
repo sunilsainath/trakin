@@ -38,10 +38,27 @@ export default function InvoicesPage() {
   const [search, setSearch] = React.useState('')
   const debouncedSearch = useDebouncedValue(search.trim())
 
+  // Deep links (e.g. /invoices?status=PAID from the CODE rail) initialize the
+  // filters; unrecognized values are ignored, never sent to the API.
+  const initialInvoiceFilters = React.useMemo(() => {
+    if (typeof window === 'undefined') return {}
+    const params = new URLSearchParams(window.location.search)
+    const filters: Record<string, string | boolean> = {}
+    const status = params.get('status') ?? ''
+    if ((INVOICE_STATUSES as readonly string[]).includes(status)) {
+      filters.status = status
+    }
+    if (params.get('overdue_only') === 'true') {
+      filters.overdue_only = true
+    }
+    return filters
+  }, [])
+
   const list = useCursorList<PageEnvelope<Invoice>>({
     companyPublicId: activeCompanyPublicId,
     path: '/invoices',
     queryKey: ['invoices', 'list'],
+    initialFilters: initialInvoiceFilters,
   })
 
   React.useEffect(() => {

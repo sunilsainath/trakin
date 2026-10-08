@@ -48,10 +48,28 @@ export default function ContractsPage() {
   const [search, setSearch] = React.useState('')
   const debouncedSearch = useDebouncedValue(search.trim())
 
+  // Deep links (e.g. /contracts?status=ACTIVE from the CODE rail) initialize
+  // the filters; unrecognized values are ignored, never sent to the API.
+  const initialContractFilters = React.useMemo(() => {
+    if (typeof window === 'undefined') return {}
+    const params = new URLSearchParams(window.location.search)
+    const filters: Record<string, string> = {}
+    const status = params.get('status') ?? ''
+    if ((CONTRACT_STATUSES as readonly string[]).includes(status)) {
+      filters.status = status
+    }
+    const expiring = params.get('expiring_within_days') ?? ''
+    if (/^\d{1,3}$/.test(expiring)) {
+      filters.expiring_within_days = expiring
+    }
+    return filters
+  }, [])
+
   const list = useCursorList<PageEnvelope<Contract>>({
     companyPublicId: activeCompanyPublicId,
     path: '/contracts',
     queryKey: ['contracts', 'list'],
+    initialFilters: initialContractFilters,
   })
 
   React.useEffect(() => {

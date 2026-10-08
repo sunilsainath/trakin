@@ -46,11 +46,21 @@ export default function SowsPage() {
   const [search, setSearch] = React.useState('')
   const debouncedSearch = useDebouncedValue(search.trim())
 
+  // Deep links (e.g. /sows?status=ACTIVE from the CODE rail) initialize the
+  // filter; unrecognized values are ignored, never sent to the API.
+  const initialStatus =
+    typeof window === 'undefined'
+      ? null
+      : (() => {
+          const value = new URLSearchParams(window.location.search).get('status') ?? ''
+          return (SOW_STATUSES as readonly string[]).includes(value) ? value : null
+        })()
+
   const list = useCursorList<PageEnvelope<Sow>>({
     companyPublicId: activeCompanyPublicId,
     path: '/sows',
     queryKey: ['sows', 'list'],
-    initialFilters: { q: debouncedSearch || null, status: null },
+    initialFilters: { q: debouncedSearch || null, status: initialStatus },
   })
 
   React.useEffect(() => {
