@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.deps import RequestContext, require_company_member
+from app.api.deps import RequestContext, require_company
 from app.core.logging import get_logger
 from app.core.rate_limit import rate_limited
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
@@ -22,7 +22,7 @@ from app.schemas.identity import SearchHit
 router = APIRouter(prefix="/search", tags=["search"])
 logger = get_logger(__name__)
 
-Context = Annotated[tuple[RequestContext, AsyncConnection], Depends(require_company_member)]
+Context = Annotated[tuple[RequestContext, AsyncConnection], Depends(require_company)]
 
 ENTITY_TYPES = (
     "PERSON",

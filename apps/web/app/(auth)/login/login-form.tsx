@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { z } from 'zod'
 import { Mail, KeyRound } from 'lucide-react'
 
-import { getSupabase } from '@/lib/api'
+import { getSupabase, setRememberMe } from '@/lib/api'
 import { SchemaForm, type FieldConfig } from '@/components/ui/schema-form'
 import { Alert, Button } from '@/components/ui'
 
@@ -64,6 +64,7 @@ function LoginFormInner() {
   )
   // Remembered so the email-link button can reuse the address already typed.
   const [email, setEmail] = React.useState('')
+  const [remember, setRemember] = React.useState(true)
 
   const [mfaChallenge, setMfaChallenge] = React.useState<{
     factorId: string
@@ -82,6 +83,9 @@ function LoginFormInner() {
     setMfaChallenge(null)
     setEmail(values.email)
     window.localStorage.setItem('mytrakin.lastLoginEmail', values.email)
+    // Storage is chosen before the client is built: remembered sessions
+    // persist across restarts, one-off sessions die with the last tab.
+    setRememberMe(remember)
 
     const { data, error } = await getSupabase().auth.signInWithPassword({
       email: values.email,
@@ -176,7 +180,17 @@ function LoginFormInner() {
         submitLabel="Sign in"
         onSubmit={onSubmit}
         banner={null}
-      />
+      >
+        <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(event) => setRemember(event.target.checked)}
+            className="size-4 accent-primary"
+          />
+          Remember me on this device
+        </label>
+      </SchemaForm>
 
       {mfaChallenge ? (
         <form

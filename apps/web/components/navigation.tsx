@@ -1,28 +1,15 @@
 import type { ReactNode } from 'react'
 import {
+  Bell,
   Building2,
-  FolderKanban,
-  FileSignature,
-  FileText,
   Clock,
   CreditCard,
-  Wallet,
-  Sparkles,
-  Users,
-  ShieldCheck,
-  Search,
-  LayoutDashboard,
-  Bell,
-  Landmark,
-  ArrowLeftRight,
+  FolderKanban,
+  Home,
   MessageCircle,
-  FileStack,
-  Handshake,
-  BookOpen,
-  Lightbulb,
-  Zap,
-  Settings,
-  History,
+  Sparkles,
+  User,
+  Users,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -57,192 +44,59 @@ export interface NavSection {
 
 export const NAV_SECTIONS: NavSection[] = [
   {
-    label: 'Workspace',
+    label: 'Menu',
     items: [
-      { href: '/dashboard', label: 'Dashboard', icon: <LayoutDashboard aria-hidden /> },
-      { href: '/feed', label: 'Feed', icon: <History aria-hidden /> },
+      { href: '/feed', label: 'Feed (Home)', icon: <Home aria-hidden /> },
       {
-        href: '/network',
-        label: 'Network',
-        icon: <Users aria-hidden />,
-        permission: 'posts.read',
+        href: '/timesheets',
+        label: 'Work (Timesheets)',
+        icon: <Clock aria-hidden />,
+      },
+      {
+        href: '/companies',
+        label: 'Business (Companies)',
+        icon: <Building2 aria-hidden />,
+      },
+      {
+        href: '/code',
+        label: 'Code (Projects/SOW/Contracts)',
+        icon: <FolderKanban aria-hidden />,
+      },
+      {
+        href: '/invoices',
+        label: 'Payments (Invoices)',
+        icon: <CreditCard aria-hidden />,
+      },
+      {
+        href: '/assistant',
+        label: 'AI (Insights & Assistant)',
+        icon: <Sparkles aria-hidden />,
       },
       {
         href: '/messages',
         label: 'Messages',
         icon: <MessageCircle aria-hidden />,
-        permission: 'messages.read',
       },
       {
-        href: '/companies',
-        label: 'Companies',
-        icon: <Building2 aria-hidden />,
-        permission: 'companies.read',
-      },
-      {
-        href: '/people',
-        label: 'People',
+        href: '/network',
+        label: 'Connections',
         icon: <Users aria-hidden />,
-        permission: 'members.read',
-      },
-    ],
-  },
-  {
-    label: 'Core',
-    items: [
-      {
-        href: '/core',
-        label: 'Overview',
-        icon: <LayoutDashboard aria-hidden />,
-        permission: 'dashboard.read',
-      },
-    ],
-  },
-  {
-    label: 'Delivery',
-    items: [
-      {
-        href: '/projects',
-        label: 'Projects',
-        icon: <FolderKanban aria-hidden />,
-        permission: 'projects.read',
       },
       {
-        href: '/sows',
-        label: 'Statements of Work',
-        icon: <FileSignature aria-hidden />,
-        permission: 'sows.read',
+        href: '/notifications',
+        label: 'Notifications',
+        icon: <Bell aria-hidden />,
+        badge: 'notifications',
       },
       {
-        href: '/contracts',
-        label: 'Contracts',
-        icon: <FileText aria-hidden />,
-        permission: 'contracts.read',
-      },
-      {
-        href: '/time',
-        label: 'My Time & Leave',
-        icon: <Clock aria-hidden />,
-        permission: 'timesheets.create',
-      },
-      {
-        href: '/timesheets',
-        label: 'All Timesheets',
-        icon: <Clock aria-hidden />,
-        permission: 'timesheets.read_any',
-      },
-      {
-        href: '/leave',
-        label: 'Leave',
-        icon: <Clock aria-hidden />,
-        anyPermission: ['leave.read_any', 'leave.approve'],
-      },
-    ],
-  },
-  {
-    label: 'Commercial',
-    items: [
-      {
-        href: '/invoices',
-        label: 'Invoices',
-        icon: <CreditCard aria-hidden />,
-        permission: 'invoices.read',
-        badge: 'approvals',
-      },
-      {
-        href: '/billing',
-        label: 'Billing',
-        icon: <Wallet aria-hidden />,
-        anyPermission: ['billing_runs.read', 'invoices.read', 'dashboard.read'],
-      },
-      {
-        href: '/documents',
-        label: 'Documents',
-        icon: <FileStack aria-hidden />,
-        permission: 'documents.read',
-      },
-      {
-        href: '/msas',
-        label: 'Agreements',
-        icon: <Handshake aria-hidden />,
-        permission: 'msas.read',
-      },
-      {
-        href: '/payments',
-        label: 'Payments',
-        icon: <Landmark aria-hidden />,
-        permission: 'payments.read',
-      },
-      {
-        href: '/payments/accounts',
-        label: 'Bank Accounts',
-        icon: <Landmark aria-hidden />,
-        permission: 'payments.connect_bank',
-      },
-      {
-        href: '/payments/transactions',
-        label: 'Bank Transactions',
-        icon: <ArrowLeftRight aria-hidden />,
-        permission: 'transactions.read',
-      },
-      {
-        href: '/payments/reconciliation',
-        label: 'Reconciliation',
-        icon: <ArrowLeftRight aria-hidden />,
-        permission: 'reconciliation.read',
-      },
-    ],
-  },
-  {
-    label: 'Platform',
-    items: [
-      {
-        href: '/assistant',
-        label: 'AI Assistant',
-        icon: <Sparkles aria-hidden />,
-        permission: 'ai.assistant',
-      },
-      {
-        href: '/ai/insights',
-        label: 'AI Insights',
-        icon: <Lightbulb aria-hidden />,
-        permission: 'ai.insights.read',
-      },
-      {
-        href: '/ai/actions',
-        label: 'AI Actions',
-        icon: <Zap aria-hidden />,
-        permission: 'ai.read',
-        badge: 'approvals',
-      },
-      {
-        href: '/ai/automations',
-        label: 'Automations',
-        icon: <Zap aria-hidden />,
-        permission: 'ai.read',
-      },
-      {
-        href: '/ai/knowledge',
-        label: 'Knowledge Base',
-        icon: <BookOpen aria-hidden />,
-        permission: 'ai.read',
-      },
-      { href: '/search', label: 'Global Search', icon: <Search aria-hidden /> },
-      {
-        href: '/settings',
-        label: 'Settings',
-        icon: <Settings aria-hidden />,
-        permission: 'settings.read',
-      },
-      {
-        href: '/settings/permissions',
-        label: 'Roles & Permissions',
-        icon: <ShieldCheck aria-hidden />,
-        permission: 'roles.read',
+        href: '/settings/profile',
+        label: 'Profile',
+        icon: <User aria-hidden />,
       },
     ],
   },
 ]
+
 
 export function isNavItemActive(item: NavItem, pathname: string): boolean {
   if (item.href === '/dashboard') return pathname === '/dashboard'

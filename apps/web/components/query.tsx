@@ -7,6 +7,7 @@ import { AlertTriangle, RefreshCw, Lock } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Alert, Button, Card, CardContent, EmptyState, Skeleton } from '@/components/ui'
+import { useCompany } from '@/hooks/use-company'
 
 /* -------------------------------------------------------------------------- */
 /* Errors                                                                     */
@@ -224,7 +225,13 @@ export function useCompanyQuery<T>({
   enabled = true,
   staleTime,
 }: ScopedQueryOptions) {
-  const ready = Boolean(companyPublicId) && enabled
+  // Company-less users are first-class: once the workspace context has
+  // resolved, the query fires with whatever context exists (possibly none)
+  // and the server answers — data, an empty list, or a typed permission
+  // error the page renders. Waiting on `loading` (rather than on a company id)
+  // is what keeps skeletons on initial boot instead of error flashes.
+  const { loading: companyLoading } = useCompany()
+  const ready = enabled && !companyLoading
 
   return useQuery<T>({
     queryKey: ['company', companyPublicId, ...queryKey],

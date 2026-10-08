@@ -11,17 +11,17 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.deps import RequestContext, require_permission
+from app.api.deps import RequestContext, require_user_or_permission
 from app.core.rate_limit import rate_limited
 from app.services import messaging as messaging_service
 
 router = APIRouter(tags=["messaging"])
 
 MessagesRead = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("messages.read"))
+    tuple[RequestContext, AsyncConnection], Depends(require_user_or_permission("messages.read"))
 ]
 MessagesSend = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("messages.send"))
+    tuple[RequestContext, AsyncConnection], Depends(require_user_or_permission("messages.send"))
 ]
 
 

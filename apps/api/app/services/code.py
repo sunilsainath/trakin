@@ -1,4 +1,4 @@
-"""CORE module: projects, project roles, SOWs, contracts and contract roles.
+"""CODE module: projects, project roles, SOWs, contracts and contract roles.
 
 Business rules that matter, and where each one is enforced:
 
@@ -964,7 +964,8 @@ async def _sow_roles(conn: AsyncConnection, sow_id: uuid.UUID) -> list[dict[str,
                 text(
                     """
                     SELECT pr.public_id AS project_role_id, pr.title AS role_title,
-                           sr.quantity, sr.rate, sr.rate_type, sr.currency, sr.notes
+                           sr.quantity, sr.rate, sr.rate_type, sr.currency, sr.notes,
+                           sr.billing_basis, sr.billing_frequency
                       FROM public.sow_roles sr
                       JOIN public.project_roles pr ON pr.id = sr.project_role_id
                      WHERE sr.sow_id = :sid
@@ -1274,10 +1275,13 @@ async def _replace_sow_roles(
             text(
                 """
                 INSERT INTO public.sow_roles
-                  (sow_id, project_role_id, quantity, rate, rate_type, currency, notes)
+                  (sow_id, project_role_id, quantity, rate, rate_type, currency,
+                   billing_basis, billing_frequency, notes)
                 VALUES
-                  (:sid, CAST(:prid AS uuid), :quantity, :rate, :rate_type, :currency, :notes)
-                """
+                  (:sid, CAST(:prid AS uuid), :quantity, :rate, :rate_type, :currency,
+                   CAST(:billing_basis AS billing_basis),
+                   CAST(:billing_frequency AS billing_frequency), :notes)
+                """,
             ),
             {
                 "sid": sow_id,
@@ -1286,6 +1290,8 @@ async def _replace_sow_roles(
                 "rate": item.get("rate"),
                 "rate_type": item.get("rate_type", "HOURLY"),
                 "currency": item.get("currency", "USD"),
+                "billing_basis": item.get("billing_basis"),
+                "billing_frequency": item.get("billing_frequency"),
                 "notes": item.get("notes"),
             },
         )
@@ -1552,7 +1558,7 @@ async def transition_sow(
             {"actor": actor_user_id, "rid": before["id"]},
         )
         # The SOW's commercial scope becomes billable work here: one DRAFT
-        # contract per SOW, carrying every priced role. The generator is
+        # contract per priced role. The generator is
         # idempotent, so re-activating an EXPIRED SOW creates nothing new, and a
         # failure rolls the approval back with it rather than leaving an ACTIVE
         # SOW whose contracts silently never appeared.

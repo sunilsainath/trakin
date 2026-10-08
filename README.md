@@ -1,11 +1,11 @@
 # MyTrakin — Unified Professional & Business Platform
 
 Production-grade, multi-tenant SaaS combining professional networking, workforce management,
-contracting (CORE), finance (billing + PAYMENTS) and an AI platform — all behind one
+contracting (CODE), finance (billing + PAYMENTS) and an AI platform — all behind one
 authorization model and PostgreSQL Row Level Security.
 
 > **Status: implemented.** Multi-tenant RBAC + RLS, authentication (email verification,
-> sessions, MFA, Google OAuth), contracting (CORE), timesheets + leave, billing + invoicing,
+> sessions, MFA, Google OAuth), contracting (CODE), timesheets + leave, billing + invoicing,
 > payments + reconciliation, documents + MSA, social + messaging, global search and an AI
 > platform (gateway, RAG, agents) — with unit, integration, RLS security and API-sweep
 > suites, and CI running lint, types, unit tests, the web build and migrations-from-empty.

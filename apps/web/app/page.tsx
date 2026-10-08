@@ -18,8 +18,8 @@ const MODULES = [
     text: 'Companies, roles with granular permissions, verified documents, and MSA-gated business relationships.',
   },
   {
-    key: 'CORE',
-    title: 'Core',
+    key: 'CODE',
+    title: 'Code',
     text: 'Projects, SOW allocations with capacity guardrails, contracts with acceptance workflows, and an idempotent billing engine.',
   },
   {

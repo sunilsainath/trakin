@@ -295,6 +295,41 @@ def require_any_permission(*permissions: str) -> PermissionDependency:
     return dependency
 
 
+def require_user_or_permission(permission: str) -> PermissionDependency:
+    """Company permission when a company is in context, plain identity otherwise.
+
+    Social surfaces are user namespaces, not company resources: a person
+    without a company (or browsing outside it) still reads their own feed,
+    posts and connects, governed by RLS and the service visibility rules
+    rather than company role keys. When a company IS in context, the
+    permission is enforced exactly as `require_permission` enforces it, so
+    company controls lose nothing. An invalid or foreign company header
+    degrades to the user scope (fewer rights, never more), never to an error
+    that would strand a legitimate user.
+    """
+
+    async def dependency(
+        ctx_and_conn: Annotated[tuple[RequestContext, AsyncConnection], Depends(require_company)],
+    ) -> tuple[RequestContext, AsyncConnection]:
+        ctx, conn = ctx_and_conn
+        if ctx.company_id is None:
+            return ctx, conn
+        if permission not in ctx.permissions:
+            logger.info(
+                "permission_denied",
+                permission=permission,
+                company_id=str(ctx.company_id or ""),
+            )
+            raise PermissionDeniedError(
+                f"This action requires the {permission} permission.",
+                request_id=ctx.request_id,
+            )
+        return ctx, conn
+
+    dependency.__name__ = f"require_user_or_{permission.replace('.', '_')}"
+    return dependency
+
+
 def company_scope(ctx: RequestContext) -> uuid.UUID:
     """The caller's company id, narrowed to a value that cannot be missing.
 

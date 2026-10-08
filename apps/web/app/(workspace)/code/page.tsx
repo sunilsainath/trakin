@@ -39,12 +39,12 @@ export default function CoreOverviewPage() {
     return (
       <PageShell width="wide">
         <PageHeader
-          crumbs={[{ label: 'Core' }]}
-          title="Core overview"
+          crumbs={[{ label: 'Code' }]}
+          title="Code overview"
           description="Projects, SOWs, contracts and receivables at a glance."
         />
         <PermissionState
-          error={{ code: 'PERMISSION_DENIED', message: 'Reading the Core overview requires dashboard.read.' }}
+          error={{ code: 'PERMISSION_DENIED', message: 'Reading the Code overview requires dashboard.read.' }}
         />
       </PageShell>
     )
@@ -54,8 +54,8 @@ export default function CoreOverviewPage() {
     return (
       <PageShell width="wide">
         <PageHeader
-          crumbs={[{ label: 'Core' }]}
-          title="Core overview"
+          crumbs={[{ label: 'Code' }]}
+          title="Code overview"
           description="Projects, SOWs, contracts and receivables at a glance."
         />
         <LoadingBlock rows={6} />
@@ -67,8 +67,8 @@ export default function CoreOverviewPage() {
     return (
       <PageShell width="wide">
         <PageHeader
-          crumbs={[{ label: 'Core' }]}
-          title="Core overview"
+          crumbs={[{ label: 'Code' }]}
+          title="Code overview"
           description="Projects, SOWs, contracts and receivables at a glance."
         />
         {isPermissionError(dashboard.error) ? (
@@ -96,8 +96,8 @@ export default function CoreOverviewPage() {
   return (
     <PageShell width="wide">
       <PageHeader
-        crumbs={[{ label: 'Core' }]}
-        title="Core overview"
+        crumbs={[{ label: 'Code' }]}
+        title="Code overview"
         description="Projects, SOWs, contracts and receivables at a glance."
       />
       <div className="space-y-4">

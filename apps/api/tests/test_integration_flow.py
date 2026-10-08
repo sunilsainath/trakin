@@ -2065,7 +2065,7 @@ async def test_generating_twice_does_not_duplicate_contracts(conn, skeleton, ten
         request_id="flow",
         ip_address=None,
     )
-    assert [c["public_id"] for c in repeat] == active["contract_ids"]
+    assert repeat == []
 
     final = await code.get_sow(conn, company_id=tenant.company_id, public_id=sow["public_id"])
     assert final["contract_count"] == 1
@@ -3495,3 +3495,67 @@ async def test_me_reports_company_membership(conn, tenants) -> None:
     me = await identity.get_me(conn, admin.user_id)
     assert me["has_company"] is True
     assert me["onboarding_completed"] is False
+
+
+async def test_approving_a_multi_role_sow_generates_one_contract_per_role(
+    conn, skeleton, tenants
+) -> None:
+    """One role means one contract; rerunning fills no gaps twice."""
+    from app.services import code, contracts
+
+    tenant = tenants["admin"]
+    project_pid = await _public(conn, "projects", skeleton.project)
+    first_role_pid = await _public(conn, "project_roles", skeleton.project_role)
+    second = await code.create_project_role(
+        conn,
+        company_id=tenant.company_id,
+        project_public_id=project_pid,
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        payload={"title": "Second chair", "required_count": 3},
+    )
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {
+            "title": "Two-role SOW",
+            "counterparty_company_id": tenants["worker"].company_public_id,
+            "roles": [
+                {"project_role_id": first_role_pid, "quantity": 1},
+                {
+                    "project_role_id": second["public_id"],
+                    "quantity": 2,
+                    "billing_basis": "FIXED",
+                    "billing_frequency": "QUARTERLY",
+                },
+            ],
+        },
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+    assert active["contract_count"] == 2
+
+    made = [
+        await contracts.get_contract(conn, company_id=tenant.company_id, public_id=pid)
+        for pid in active["contract_ids"]
+    ]
+    assert {c["contract_type"] for c in made} == {"COMPANY"}
+    assert sorted(len(c["roles"]) for c in made) == [1, 1]
+    assert {c["roles"][0]["project_role_id"] for c in made} == {first_role_pid, second["public_id"]}
+    by_role = {c["roles"][0]["project_role_id"]: c["roles"][0] for c in made}
+    assert by_role[second["public_id"]]["billing_basis"] == "FIXED"
+    assert by_role[second["public_id"]]["billing_frequency"] == "QUARTERLY"
+    # A role without overrides inherits the SOW-level terms.
+    assert by_role[first_role_pid]["billing_basis"] == "TIMESHEET"
+    assert by_role[first_role_pid]["billing_frequency"] == "MONTHLY"
+
+    repeat = await contracts.generate_contracts_for_sow(
+        conn,
+        company_id=tenant.company_id,
+        sow_id=sow["id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    assert repeat == []

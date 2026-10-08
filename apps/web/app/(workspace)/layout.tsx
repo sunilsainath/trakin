@@ -24,7 +24,11 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
 }
 
 /** Routes that render usefully with no company selected. */
-const COMPANYLESS_ROUTES = new Set(['/feed', '/companies'])
+const COMPANYLESS_ROUTES = ['/feed', '/network', '/messages', '/notifications', '/companies', '/settings']
+
+function isCompanylessRoute(pathname: string): boolean {
+  return COMPANYLESS_ROUTES.some((route) => pathname === route || pathname.startsWith(`${route}/`))
+}
 
 function WorkspaceGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -66,7 +70,7 @@ function WorkspaceGate({ children }: { children: React.ReactNode }) {
   // Company membership is never forced. The feed and the Business module
   // stay open so anyone can enter, connect and found a company; every other
   // company-scoped screen explains itself instead of spinning forever.
-  if ((companies.length === 0 || !activeCompany) && !COMPANYLESS_ROUTES.has(pathname)) {
+  if ((companies.length === 0 || !activeCompany) && !isCompanylessRoute(pathname)) {
     return (
       <div className="flex min-h-dvh items-center justify-center bg-background p-6">
         <Card className="max-w-md p-6 text-center">

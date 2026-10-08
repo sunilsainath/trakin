@@ -1,4 +1,4 @@
-"""CORE module contracts: projects, project roles, SOWs and contracts.
+"""CODE module contracts: projects, project roles, SOWs and contracts.
 
 Request bodies are strict (`extra="forbid"`) so a typo in a commercial term is
 rejected rather than silently ignored. Responses are explicit projections — no
@@ -272,6 +272,8 @@ class SowRoleRequest(_Strict):
     rate: Decimal | None = Field(default=None, ge=0)
     rate_type: RateType = "HOURLY"
     currency: CurrencyCode = "USD"
+    billing_basis: BillingBasis | None = None
+    billing_frequency: BillingFrequency | None = None
     notes: str | None = Field(default=None, max_length=2000)
 
     @field_validator("currency")
@@ -350,6 +352,8 @@ class SowRoleResponse(BaseModel):
     rate: Decimal | None = None
     rate_type: str
     currency: str
+    billing_basis: str | None = None
+    billing_frequency: str | None = None
     notes: str | None = None
 
 

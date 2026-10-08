@@ -11,7 +11,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.deps import RequestContext, require_permission
+from app.api.deps import RequestContext, require_user_or_permission
 from app.core.logging import get_logger
 from app.core.rate_limit import rate_limited
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
@@ -22,28 +22,31 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["social"])
 
 PostsRead = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.read"))
+    tuple[RequestContext, AsyncConnection], Depends(require_user_or_permission("posts.read"))
 ]
 PostsCreate = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.create"))
+    tuple[RequestContext, AsyncConnection], Depends(require_user_or_permission("posts.create"))
 ]
 PostsReact = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.react"))
+    tuple[RequestContext, AsyncConnection], Depends(require_user_or_permission("posts.react"))
 ]
 PostsComment = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.comment"))
+    tuple[RequestContext, AsyncConnection], Depends(require_user_or_permission("posts.comment"))
 ]
 ConnectionsRead = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.read"))
+    tuple[RequestContext, AsyncConnection], Depends(require_user_or_permission("connections.read"))
 ]
 ConnectionsWrite = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.create"))
+    tuple[RequestContext, AsyncConnection],
+    Depends(require_user_or_permission("connections.create")),
 ]
 ConnectionsRespond = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.respond"))
+    tuple[RequestContext, AsyncConnection],
+    Depends(require_user_or_permission("connections.respond")),
 ]
 ConnectionsRemove = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.remove"))
+    tuple[RequestContext, AsyncConnection],
+    Depends(require_user_or_permission("connections.remove")),
 ]
 
 

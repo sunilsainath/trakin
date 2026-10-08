@@ -10,7 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.deps import RequestContext, company_scope, require_permission
+from app.api.deps import (
+    RequestContext,
+    company_scope,
+    require_permission,
+    require_user_or_permission,
+)
 from app.core.logging import get_logger
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
 from app.services import ai_domain
@@ -20,7 +25,8 @@ router = APIRouter(tags=["platform"])
 logger = get_logger(__name__)
 
 NotificationsRead = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("notifications.read"))
+    tuple[RequestContext, AsyncConnection],
+    Depends(require_user_or_permission("notifications.read")),
 ]
 DashboardRead = Annotated[
     tuple[RequestContext, AsyncConnection], Depends(require_permission("dashboard.read"))
@@ -127,6 +133,10 @@ async def unread_counts(ctx_and_conn: NotificationsRead) -> dict[str, int]:
         ),
         {"uid": ctx.user_id},
     )
+    if ctx.company_id is None:
+        # No company in context: approvals are company work, so they are zero
+        # rather than an error. The badge stays truthful for company-less users.
+        return {"notifications": int(notifications.scalar() or 0), "approvals": 0}
     approvals = await conn.execute(
         text(
             """

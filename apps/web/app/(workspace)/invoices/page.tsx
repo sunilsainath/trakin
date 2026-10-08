@@ -36,8 +36,8 @@ import { ErrorState, LoadingTable, PermissionState, isPermissionError } from '@/
  */
 const INVOICE_TABS = [
   { key: 'all', label: 'All' },
-  { key: 'receivable', label: 'Receivable' },
-  { key: 'payable', label: 'Payable' },
+  { key: 'receivable', label: 'Pending' },
+  { key: 'payable', label: 'Active' },
   { key: 'DRAFT', label: 'Draft' },
   { key: 'PAID', label: 'Paid' },
   { key: 'REJECTED', label: 'Rejected' },

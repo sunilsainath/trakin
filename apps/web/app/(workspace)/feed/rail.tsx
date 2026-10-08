@@ -42,7 +42,7 @@ export function RightRail({ companyPublicId }: { companyPublicId: string | null 
   const [connecting, setConnecting] = React.useState<string | null>(null)
 
   const load = React.useCallback(async () => {
-    if (!companyPublicId) return
+    // User-scoped like the feed: works with whatever context exists.
     try {
       setError(null)
       const rows = await api.get<SuggestionsResponse>('/connections/suggestions', {
@@ -59,7 +59,6 @@ export function RightRail({ companyPublicId }: { companyPublicId: string | null 
   }, [load])
 
   const connect = async (userPublicId: string) => {
-    if (!companyPublicId) return
     setConnecting(userPublicId)
     try {
       await api.post('/connections/requests', { user_id: userPublicId }, { companyPublicId })
@@ -70,15 +69,6 @@ export function RightRail({ companyPublicId }: { companyPublicId: string | null 
     } finally {
       setConnecting(null)
     }
-  }
-
-  if (!companyPublicId) {
-    return (
-      <EmptyState
-        title="Select a company to continue"
-        description="Suggestions load in a company context. Once you belong to one, pick it in the header to meet your network."
-      />
-    )
   }
 
   if (error) {

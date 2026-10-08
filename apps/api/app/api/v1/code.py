@@ -1,4 +1,4 @@
-"""CORE module endpoints: /projects, /project-roles, /sows, /contracts.
+"""CODE module endpoints: /projects, /project-roles, /sows, /contracts.
 
 Each handler does three things and nothing else: resolve the caller's company,
 gate on a permission, and delegate to the service layer. Business rules,
@@ -39,7 +39,7 @@ from app.schemas.common import AckResponse, Page, build_page, clamp_limit, decod
 from app.services import code as code_service
 from app.services import contracts as contract_service
 
-router = APIRouter(tags=["core"])
+router = APIRouter(tags=["code"])
 logger = get_logger(__name__)
 
 ProjectsRead = Annotated[

@@ -616,3 +616,113 @@ async def test_suggestions_companies_exclude_own(conn, skeleton, tenants) -> Non
     assert worker.company_public_id in by_id
     assert by_id[worker.company_public_id]["connections_count"] >= 1
     assert admin.company_public_id not in by_id
+
+
+# =============================================================================
+# company-less access (hard rule: individuals are first-class users)
+# =============================================================================
+async def test_company_less_user_can_post_and_read_feed(conn, tenants) -> None:
+    """No company, no header: posting and reading still work user-scoped."""
+    _ = tenants
+    from app.services import social
+
+    stranger = await _stranger(conn, "solo")
+    created = await social.create_post(
+        conn,
+        actor_user_id=stranger["user_id"],
+        company_id=None,
+        request_id="pytest",
+        ip_address=None,
+        payload={"content": "Posting without a company.", "visibility": "PUBLIC"},
+    )
+    assert created["public_id"]
+    feed = await social.list_feed(conn, viewer_id=stranger["user_id"], limit=10, cursor_keys={})
+    assert created["public_id"] in {row["public_id"] for row in feed}
+
+
+async def test_company_less_users_can_connect_and_message(conn, tenants) -> None:
+    """The full social loop runs on identity alone, never on membership."""
+    _ = tenants
+    from app.services import messaging, social
+
+    first = await _stranger(conn, "first")
+    second = await _stranger(conn, "second")
+    await social.send_request(
+        conn,
+        actor_user_id=first["user_id"],
+        target_public_id=second["user_public_id"],
+        request_id="pytest",
+        message=None,
+    )
+    await social.respond_request(
+        conn,
+        actor_user_id=second["user_id"],
+        requester_public_id=first["user_public_id"],
+        request_id="pytest",
+        accept=True,
+    )
+    thread = await messaging.open_conversation(
+        conn,
+        actor_user_id=first["user_id"],
+        target_public_id=second["user_public_id"],
+        request_id="pytest",
+    )
+    assert thread["public_id"]
+    sent = await messaging.send_message(
+        conn,
+        actor_user_id=first["user_id"],
+        conversation_public_id=thread["public_id"],
+        request_id="pytest",
+        ip_address=None,
+        payload={"content": "Hello from outside any company."},
+    )
+    assert sent["id"]
+    thread_messages = await messaging.list_messages(
+        conn,
+        actor_user_id=second["user_id"],
+        conversation_public_id=thread["public_id"],
+        limit=10,
+    )
+    assert sent["id"] in {row["id"] for row in thread_messages}
+    inbox = await messaging.list_conversations(conn, actor_user_id=second["user_id"], limit=10)
+    assert thread["public_id"] in {row["public_id"] for row in inbox}
+
+
+async def test_user_or_permission_dep_branches_correctly(conn, tenants) -> None:
+    """No company: pass. Company without the key: 403. With it: pass."""
+    from app.api.deps import RequestContext, require_user_or_permission
+    from app.core.errors import PermissionDeniedError
+    from app.core.security import AuthenticatedUser
+
+    _ = tenants
+    auth = AuthenticatedUser(
+        auth_id=str(uuid.uuid4()),
+        email="nobody@example.test",
+        email_verified=True,
+        session_id=None,
+        provider="test",
+    )
+    dep = require_user_or_permission("posts.read")
+
+    bare = RequestContext(user_id=uuid.uuid4(), auth=auth, request_id="pytest")
+    assert await dep((bare, conn)) == (bare, conn)
+
+    denied = RequestContext(
+        user_id=uuid.uuid4(),
+        auth=auth,
+        company_id=uuid.uuid4(),
+        request_id="pytest",
+        permissions=frozenset({"other.key"}),
+    )
+    with pytest.raises(PermissionDeniedError):
+        await dep((denied, conn))
+
+    allowed = RequestContext(
+        user_id=uuid.uuid4(),
+        auth=auth,
+        company_id=uuid.uuid4(),
+        request_id="pytest",
+        permissions=frozenset({"posts.read"}),
+        role_keys=("MEMBER",),
+    )
+    assert await dep((allowed, conn)) == (allowed, conn)

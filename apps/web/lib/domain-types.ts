@@ -1,5 +1,5 @@
 /**
- * API response types for the CORE, WORK, BILLING and PLATFORM modules.
+ * API response types for the CODE, WORK, BILLING and PLATFORM modules.
  *
  * These mirror the API's Pydantic schemas (see `apps/api/app/schemas`). Amounts
  * are decimal strings, not numbers: `0.1 + 0.2` in binary floating point is how a
@@ -19,7 +19,7 @@ export type { Page }
 export type Money = string
 
 /* -------------------------------------------------------------------------- */
-/* CORE: projects                                                              */
+/* CODE: projects                                                              */
 /* -------------------------------------------------------------------------- */
 
 export const PROJECT_STATUSES = [
@@ -155,7 +155,7 @@ export interface ProjectBilling {
 }
 
 /* -------------------------------------------------------------------------- */
-/* CORE: statements of work and contracts                                     */
+/* CODE: statements of work and contracts                                     */
 /* -------------------------------------------------------------------------- */
 
 export const SOW_STATUSES = [
@@ -178,6 +178,8 @@ export interface SowRole {
   rate: string | null
   rate_type: string
   currency: string
+  billing_basis: string | null
+  billing_frequency: string | null
   notes: string | null
 }
 

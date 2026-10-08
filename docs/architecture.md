@@ -58,7 +58,7 @@ with a typed `IntegrationNotConfigured` error rather than a fake success.
 | **Identity** | account, profile, visibility, skills, credentials, sessions | `users`, `user_profiles`, `user_privacy`, `user_skills`, `user_educations`, `user_experiences`, `user_sessions` |
 | **Social** | connections, feed, messaging | `connections`, `posts`, `post_comments`, `post_reactions`, `post_shares`, `reports`, `user_blocks`, `conversations`, `messages` |
 | **Business** | company, membership, roles, permissions | `companies`, `company_memberships`, `company_roles`, `permissions`, `role_permissions`, `company_invitations` |
-| **CORE** | projects, project roles, allocation, SOW, contracts | `projects`, `project_roles`, `project_role_allocations`, `sows`, `sow_roles`, `contracts`, `contract_parties`, `contract_roles`, `contract_line_items`, `contract_approval_steps`, `msas`, `msa_versions`, `msa_requests` |
+| **CODE** | projects, project roles, allocation, SOW, contracts | `projects`, `project_roles`, `project_role_allocations`, `sows`, `sow_roles`, `contracts`, `contract_parties`, `contract_roles`, `contract_line_items`, `contract_approval_steps`, `msas`, `msa_versions`, `msa_requests` |
 | **WORK** | timesheets, approvals, leave, assignments | `assignments`, `timesheets`, `timesheet_entries`, `timesheet_revisions`, `timesheet_approvals`, `leave_policies`, `leave_balances`, `leave_requests` |
 | **Billing** | invoices, AR/AP | `invoices`, `invoice_items`, `invoice_allocations`, `invoice_approvals`, `billing_runs` |
 | **Payments** | accounts, transactions, reconciliation, payouts | `payment_accounts`, `bank_accounts`, `bank_transactions`, `payments`, `payment_allocations`, `payment_matches`, `payment_requests`, `payment_schedules` |
@@ -67,7 +67,7 @@ with a typed `IntegrationNotConfigured` error rather than a fake success.
 | **Platform** | audit, events, idempotency, flags, notifications, tasks | `audit_logs`, `outbox_events`, `idempotency_keys`, `feature_flags`, `notifications`, `tasks`, `rate_limit_counters` |
 
 Cross-context access is by **foreign key only**. There is no shared mutable table between
-CORE and PAYMENTS; they meet at `invoices` and `payments`, both of which are append-audited.
+CODE and PAYMENTS; they meet at `invoices` and `payments`, both of which are append-audited.
 
 ## 4. Identity, tenancy and the request pipeline
 
@@ -188,7 +188,7 @@ with migrations gated to protected environments.
 | 1 | Foundation: repo, schema, RLS, RBAC, auth, design system, CI | schema applies, auth round-trip, RLS tests green |
 | 2 | Profile, social, feed, messaging, notifications | cross-user privacy tests green |
 | 3 | Companies, roles, employees, W-9 intelligence, documents, MSA | tenant isolation tests green |
-| 4 | CORE: projects, roles, SOW, contracts, acceptance | allocation invariants enforced in SQL |
+| 4 | CODE: projects, roles, SOW, contracts, acceptance | allocation invariants enforced in SQL |
 | 5 | WORK: timesheets, approval chains, leave, AI import | approval chain + SoD tests green |
 | 6 | Billing engine, invoices, AR/AP | idempotent generation proven |
 | 7 | PAYMENTS: Plaid, transactions, reconciliation | no duplicate money movement |

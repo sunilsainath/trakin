@@ -5,7 +5,7 @@ import * as React from 'react'
 import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
 import { PageHeader, PageShell } from '@/components/page'
-import { Alert, Button, Card, CardContent, CardHeader, CardTitle, EmptyState } from '@/components/ui'
+import { Alert, Button, Card, CardContent, CardHeader, CardTitle } from '@/components/ui'
 import { ErrorState, LoadingBlock } from '@/components/query'
 import { notifyError } from '@/components/toast'
 import { ProfessionalFeed } from '@/components/post-feed'
@@ -24,7 +24,6 @@ export default function NetworkPage() {
   const [invite, setInvite] = React.useState('')
 
   const load = React.useCallback(async () => {
-    if (!activeCompanyPublicId) return
     try {
       setError(null)
       const directory = await api.get<{ data: Connection[] }>('/connections?limit=100', {
@@ -42,7 +41,7 @@ export default function NetworkPage() {
 
   const connect = async () => {
     const target = invite.trim()
-    if (!target || !activeCompanyPublicId) return
+    if (!target) return
     setNotice(null)
     try {
       await api.post(
@@ -55,18 +54,6 @@ export default function NetworkPage() {
     } catch (cause) {
       notifyError(cause)
     }
-  }
-
-  if (!activeCompanyPublicId) {
-    return (
-      <PageShell>
-        <PageHeader title="Network" description="Posts and professional connections." />
-        <EmptyState
-          title="Select a company to continue"
-          description="Your network loads in a company context. Once you belong to one, pick it in the header to see posts and connections."
-        />
-      </PageShell>
-    )
   }
 
   return (

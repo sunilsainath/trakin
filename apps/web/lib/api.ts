@@ -19,9 +19,34 @@ const API_PREFIX = '/api/v1'
 /* -------------------------------------------------------------------------- */
 
 let supabase: SupabaseClient | null = null
+let supabaseRemember: boolean | null = null
+
+const REMEMBER_KEY = 'mytrakin.rememberMe'
+
+function wantRememberMe(): boolean {
+  if (typeof window === 'undefined') return true
+  return window.localStorage.getItem(REMEMBER_KEY) !== 'false'
+}
+
+/**
+ * Choose whether the session survives a browser restart. Takes effect on the
+ * next client build (i.e. call it before signing in): remembered sessions
+ * live in localStorage, one-off sessions in sessionStorage, which the browser
+ * drops when the last tab closes.
+ */
+export function setRememberMe(remember: boolean): void {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(REMEMBER_KEY, remember ? 'true' : 'false')
+  }
+  if (supabaseRemember !== remember) {
+    supabase = null
+    supabaseRemember = remember
+  }
+}
 
 export function getSupabase(): SupabaseClient {
-  if (supabase) return supabase
+  const remember = wantRememberMe()
+  if (supabase && supabaseRemember === remember) return supabase
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -39,8 +64,10 @@ export function getSupabase(): SupabaseClient {
       detectSessionInUrl: true,
       // Short refresh window; the API still enforces its own session policy.
       flowType: 'pkce',
+      storage: remember ? window.localStorage : window.sessionStorage,
     },
   })
+  supabaseRemember = remember
 
   return supabase
 }

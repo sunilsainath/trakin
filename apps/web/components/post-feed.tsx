@@ -62,7 +62,8 @@ export function ProfessionalFeed({
   const [error, setError] = React.useState<unknown>(null)
 
   const load = React.useCallback(async () => {
-    if (!companyPublicId) return
+    // No company gate: the posts endpoints are user-scoped, so the call goes
+    // out with whatever context exists (possibly none) and the server decides.
     try {
       setError(null)
       const feed = await api.get<{ data: FeedPost[] }>('/posts?limit=25', {
@@ -77,15 +78,6 @@ export function ProfessionalFeed({
   React.useEffect(() => {
     void load()
   }, [load])
-
-  if (!companyPublicId) {
-    return (
-      <EmptyState
-        title="Select a company to continue"
-        description="Posts load in a company context. Once you belong to one, pick it in the header to see your network's posts."
-      />
-    )
-  }
 
   if (error) {
     return <ErrorState error={error} onRetry={() => void load()} />
@@ -139,7 +131,7 @@ function PostCard({
 }: {
   post: FeedPost
   mePublicId: string | null
-  companyPublicId: string
+  companyPublicId: string | null
   onChanged: () => void
 }) {
   const [commentsOpen, setCommentsOpen] = React.useState(false)

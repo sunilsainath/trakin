@@ -573,19 +573,20 @@ async def generate_contracts_for_sow(
     request_id: str,
     ip_address: str | None,
 ) -> list[dict[str, Any]]:
-    """Create the DRAFT contract an activated SOW calls for.
+    """Create one DRAFT contract per SOW role on activation.
 
-    One contract per SOW, addressed to the SOW's single counterparty and
-    carrying every priced role on the SOW's own commercial terms:
+    One role means one contract: each contract carries its single priced role
+    on the SOW's own commercial terms, addressed to the SOW's counterparty:
 
-    - a COMPANY SOW produces a COMPANY contract for the counterparty company;
-    - an INDIVIDUAL SOW produces an INDIVIDUAL contract for the person (§29),
+    - a COMPANY SOW produces COMPANY contracts for the counterparty company;
+    - an INDIVIDUAL SOW produces INDIVIDUAL contracts for the person (§29),
       so every real engagement gets contract, payment and audit behavior.
 
-    The generator is idempotent: a SOW that already has contracts gains no
-    more, so re-activating an EXPIRED SOW is safe. Contracts start DRAFT so the
-    normal send → accept → activate workflow, with its recorded acceptance,
-    still runs. A SOW with generation switched off yields nothing.
+    The generator is idempotent per role: roles that already have a contract
+    are skipped, so re-activating an EXPIRED SOW only fills genuine gaps.
+    Contracts start DRAFT so the normal send → accept → activate workflow,
+    with its recorded acceptance, still runs. A SOW with generation switched
+    off yields nothing.
     """
     sow = (
         (
@@ -617,35 +618,15 @@ async def generate_contracts_for_sow(
     if not sow["auto_generate_contracts"]:
         return []
 
-    existing = (
-        (
-            await conn.execute(
-                text(
-                    """
-                    SELECT public_id FROM public.contracts
-                     WHERE sow_id = :sid AND deleted_at IS NULL
-                     ORDER BY created_at
-                    """
-                ),
-                {"sid": sow_id},
-            )
-        )
-        .mappings()
-        .all()
-    )
-    if existing:
-        return [
-            await get_contract(conn, company_id=company_id, public_id=str(r["public_id"]))
-            for r in existing
-        ]
-
     roles = (
         (
             await conn.execute(
                 text(
                     """
-                    SELECT pr.public_id AS project_role_id, sr.quantity,
-                           sr.rate, sr.rate_type, sr.currency
+                    SELECT pr.id AS project_role_uuid, pr.public_id AS project_role_id,
+                           pr.title AS role_title, sr.quantity,
+                           sr.rate, sr.rate_type, sr.currency,
+                           sr.billing_basis, sr.billing_frequency
                       FROM public.sow_roles sr
                       JOIN public.project_roles pr ON pr.id = sr.project_role_id
                      WHERE sr.sow_id = :sid
@@ -664,41 +645,66 @@ async def generate_contracts_for_sow(
             details={"reason": "SOW_HAS_NO_ROLES"},
         )
 
-    label = sow["company_name"] or sow["user_name"] or "counterparty"
-    title = f"{sow['title']} — {label}"
-    if len(title) > 200:
-        title = title[:197] + "..."
+    contracted = {
+        str(r["project_role_id"])
+        for r in (
+            await conn.execute(
+                text(
+                    """
+                    SELECT cr.project_role_id
+                      FROM public.contract_roles cr
+                      JOIN public.contracts c ON c.id = cr.contract_id
+                     WHERE c.sow_id = :sid AND c.deleted_at IS NULL
+                    """
+                ),
+                {"sid": sow_id},
+            )
+        )
+        .mappings()
+        .all()
+    }
 
-    created = await create_contract(
-        conn,
-        company_id=company_id,
-        actor_user_id=actor_user_id,
-        request_id=request_id,
-        ip_address=ip_address,
-        payload={
-            "project_id": str(sow["project_public_id"]),
-            "sow_id": str(sow["public_id"]),
-            "title": title,
-            "contract_type": "COMPANY" if sow["sow_type"] == "COMPANY" else "INDIVIDUAL",
-            "currency": sow["currency"],
-            "billing_basis": sow["billing_basis"],
-            "billing_frequency": sow["billing_frequency"],
-            "payment_terms_days": sow["payment_terms_days"],
-            "start_date": sow["start_date"],
-            "end_date": sow["end_date"],
-            "roles": [
-                {
-                    "project_role_id": str(r["project_role_id"]),
-                    "quantity": r["quantity"],
-                    "rate": r["rate"],
-                    "rate_type": r["rate_type"] or "HOURLY",
-                    "currency": r["currency"] or sow["currency"],
-                }
-                for r in roles
-            ],
-        },
-    )
-    return [created]
+    contract_type = "COMPANY" if sow["sow_type"] == "COMPANY" else "INDIVIDUAL"
+    created: list[dict[str, Any]] = []
+    for item in roles:
+        if str(item["project_role_uuid"]) in contracted:
+            continue
+        title = f"{sow['title']} — {item['role_title']}"
+        if len(title) > 200:
+            title = title[:197] + "..."
+        created.append(
+            await create_contract(
+                conn,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                request_id=request_id,
+                ip_address=ip_address,
+                payload={
+                    "project_id": str(sow["project_public_id"]),
+                    "sow_id": str(sow["public_id"]),
+                    "title": title,
+                    "contract_type": contract_type,
+                    "currency": sow["currency"],
+                    "billing_basis": sow["billing_basis"],
+                    "billing_frequency": sow["billing_frequency"],
+                    "payment_terms_days": sow["payment_terms_days"],
+                    "start_date": sow["start_date"],
+                    "end_date": sow["end_date"],
+                    "roles": [
+                        {
+                            "project_role_id": str(item["project_role_id"]),
+                            "quantity": item["quantity"],
+                            "rate": item["rate"],
+                            "rate_type": item["rate_type"] or "HOURLY",
+                            "currency": item["currency"] or sow["currency"],
+                            "billing_basis": item["billing_basis"],
+                            "billing_frequency": item["billing_frequency"],
+                        }
+                    ],
+                },
+            )
+        )
+    return created
 
 
 async def _resolve_contract_roles(
