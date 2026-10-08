@@ -100,8 +100,23 @@ export default function OnboardingPage() {
     }
   }
 
+  const skipCompany = async () => {
+    setNotice(null)
+    setFinishing(true)
+    try {
+      // Company founding is optional: professionals join to network first and
+      // found (or join) a company later from onboarding or the workspace.
+      await api.post('/users/me/onboarding')
+      router.replace('/network')
+      router.refresh()
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : 'Could not continue.')
+      setFinishing(false)
+    }
+  }
+
   return (
-    <AuthShell title="Welcome to MyTrakin" subtitle="Three steps and you are in.">
+    <AuthShell title="Welcome to MyTrakin" subtitle="Your profile, then company if you want one.">
       <div className="space-y-4">
         {notice ? <Alert tone="info">{notice}</Alert> : null}
 
@@ -153,6 +168,14 @@ export default function OnboardingPage() {
               onSubmit={createCompany}
               banner={null}
             />
+            <button
+              type="button"
+              disabled={finishing}
+              onClick={() => void skipCompany()}
+              className="w-full text-center text-sm text-muted-foreground hover:text-foreground disabled:opacity-50"
+            >
+              {finishing ? 'Continuing…' : 'Skip for now — I just want to network'}
+            </button>
           </div>
         ) : null}
 

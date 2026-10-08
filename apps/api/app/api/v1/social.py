@@ -1,7 +1,9 @@
 """Professional network endpoints: posts, comments, reactions, connections.
 
-Permission model: reading needs the read key, writing needs the write key,
-and authorship/connection state is enforced in the service layer on top of RLS.
+The network is personal, not company-scoped: any signed-in user may read and
+participate (LinkedIn model). Authorship, connection state and blocks are
+enforced in the service layer, and visibility in RLS. Company membership is
+never required here; business modules keep their own permission gates.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.deps import RequestContext, require_permission
+from app.api.deps import RequestContext, require_user
 from app.core.logging import get_logger
 from app.core.rate_limit import rate_limited
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
@@ -21,30 +23,16 @@ logger = get_logger(__name__)
 
 router = APIRouter(tags=["social"])
 
-PostsRead = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.read"))
-]
-PostsCreate = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.create"))
-]
-PostsReact = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.react"))
-]
-PostsComment = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("posts.comment"))
-]
-ConnectionsRead = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.read"))
-]
-ConnectionsWrite = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.create"))
-]
-ConnectionsRespond = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.respond"))
-]
-ConnectionsRemove = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("connections.remove"))
-]
+UserContext = Annotated[tuple[RequestContext, AsyncConnection], Depends(require_user)]
+
+PostsRead = UserContext
+PostsCreate = UserContext
+PostsReact = UserContext
+PostsComment = UserContext
+ConnectionsRead = UserContext
+ConnectionsWrite = UserContext
+ConnectionsRespond = UserContext
+ConnectionsRemove = UserContext
 
 
 def _ctx_ip(ctx: RequestContext) -> str | None:

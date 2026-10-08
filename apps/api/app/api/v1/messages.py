@@ -1,7 +1,8 @@
 """1:1 messaging between connected users.
 
-Reading needs messages.read, sending needs messages.send, and the service
-additionally requires an ACCEPTED connection (or rejects blocked pairs).
+Personal like the network: any signed-in user may read and send. The service
+requires an ACCEPTED connection (and rejects blocked pairs); RLS scopes rows
+to the caller's own threads.
 """
 
 from __future__ import annotations
@@ -11,18 +12,16 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.deps import RequestContext, require_permission
+from app.api.deps import RequestContext, require_user
 from app.core.rate_limit import rate_limited
 from app.services import messaging as messaging_service
 
 router = APIRouter(tags=["messaging"])
 
-MessagesRead = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("messages.read"))
-]
-MessagesSend = Annotated[
-    tuple[RequestContext, AsyncConnection], Depends(require_permission("messages.send"))
-]
+UserContext = Annotated[tuple[RequestContext, AsyncConnection], Depends(require_user)]
+
+MessagesRead = UserContext
+MessagesSend = UserContext
 
 
 @router.get("/conversations", summary="List my conversations")

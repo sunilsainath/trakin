@@ -34,6 +34,16 @@ function WorkspaceGate({ children }: { children: React.ReactNode }) {
     }
   }, [loading, me, pathname])
 
+  // Company-less users are first-class: the network is personal, so they land
+  // on the feed instead of a company dashboard that cannot load for them.
+  React.useEffect(() => {
+    if (!loading && me && me.onboarding_completed && companies.length === 0) {
+      if (pathname === '/dashboard' || pathname === '/') {
+        window.location.href = '/network'
+      }
+    }
+  }, [loading, me, companies, pathname])
+
   if (loading) {
     return (
       <div className="flex min-h-dvh items-center justify-center bg-background">
@@ -67,21 +77,23 @@ function WorkspaceGate({ children }: { children: React.ReactNode }) {
     )
   }
 
-  // A signed-in user with no membership cannot use the workspace at all.
-  if (companies.length === 0 || !activeCompany) {
+  // Company-less users enter the shell: the network, messages and search are
+  // personal. Company modules show their own empty/permission states, and the
+  // effect above steers them away from the company dashboard.
+  if (!activeCompany && companies.length > 0) {
     return (
       <div className="flex min-h-dvh items-center justify-center bg-background p-6">
         <Card className="max-w-md p-6 text-center">
-          <h1 className="text-base font-semibold">You are not part of a company yet</h1>
+          <h1 className="text-base font-semibold">Select a company to continue</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            Create a company to start working, or ask a colleague to invite you.
+            Your memberships loaded, but none is active right now.
           </p>
           <div className="mt-4 flex justify-center gap-2">
             <Button asChild>
-              <a href="/companies/new">Create a company</a>
+              <a href="/companies">Choose a company</a>
             </Button>
             <Button variant="outline" asChild>
-              <a href="/invitations">I have an invitation</a>
+              <a href="/network">Go to the network instead</a>
             </Button>
           </div>
         </Card>

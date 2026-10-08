@@ -32,7 +32,7 @@ import {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const { me, unread, refreshUnread } = useCompany()
+  const { me, unread, refreshUnread, companies, loading } = useCompany()
   const sections = useVisibleNavigation()
 
   // Badge nudge: realtime INSERTs refresh counts immediately; the 60s poll in
@@ -287,6 +287,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </header>
 
+          {!loading && companies.length === 0 ? (
+            <div className="border-b border-border bg-primary-soft px-3 py-2 text-center text-sm sm:px-5">
+              <span className="text-primary-strong">
+                You are networking personally —{' '}
+                <a href="/onboarding" className="font-medium underline">
+                  create a company
+                </a>{' '}
+                to unlock projects, contracts and billing.
+              </span>
+            </div>
+          ) : null}
           <main className="min-w-0 flex-1">{children}</main>
         </div>
       </div>
