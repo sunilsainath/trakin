@@ -349,25 +349,33 @@ async def create_document(
     )["id"]
 
     if storage_path is not None:
-        await conn.execute(
-            text(
-                """
-                INSERT INTO public.document_versions
-                  (document_id, version_no, file_name, content_type, byte_size,
-                   storage_path, checksum_sha256, uploaded_by)
-                VALUES (CAST(:did AS uuid), 1, :file_name, :content_type, :size,
-                        :storage_path, :checksum, :actor)
-                """
-            ),
-            {
-                "did": document_id,
-                "file_name": file_name or "document.bin",
-                "content_type": content_type,
-                "size": len(content or b""),
-                "storage_path": storage_path,
-                "checksum": checksum,
-                "actor": actor_user_id,
-            },
+        from app.services import document_pipeline
+
+        version_id = (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.document_versions
+                      (document_id, version_no, file_name, mime_type, byte_size,
+                       storage_path, checksum_sha256, uploaded_by)
+                    VALUES (CAST(:did AS uuid), 1, :file_name, :content_type, :size,
+                            :storage_path, :checksum, :actor)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "did": document_id,
+                    "file_name": file_name or "document.bin",
+                    "content_type": content_type,
+                    "size": len(content or b""),
+                    "storage_path": storage_path,
+                    "checksum": checksum,
+                    "actor": actor_user_id,
+                },
+            )
+        ).scalar_one()
+        await document_pipeline.enqueue_processing(
+            conn, version_id=version_id, company_id=company_id
         )
 
     await audit.record(
@@ -427,28 +435,34 @@ async def add_version(
         storage_path, content, {"content-type": content_type, "upsert": "false"}
     )
 
-    await conn.execute(
-        text(
-            """
-            INSERT INTO public.document_versions
-              (document_id, version_no, file_name, content_type, byte_size,
-               storage_path, checksum_sha256, uploaded_by, change_note)
-            VALUES (CAST(:did AS uuid), :version, :file_name, :content_type, :size,
-                    :storage_path, :checksum, :actor, :note)
-            """
-        ),
-        {
-            "did": document["id"],
-            "version": version_no,
-            "file_name": file_name,
-            "content_type": content_type,
-            "size": len(content),
-            "storage_path": storage_path,
-            "checksum": checksum,
-            "actor": actor_user_id,
-            "note": reason,
-        },
-    )
+    from app.services import document_pipeline
+
+    version_id = (
+        await conn.execute(
+            text(
+                """
+                INSERT INTO public.document_versions
+                  (document_id, version_no, file_name, mime_type, byte_size,
+                   storage_path, checksum_sha256, uploaded_by, change_note)
+                VALUES (CAST(:did AS uuid), :version, :file_name, :content_type, :size,
+                        :storage_path, :checksum, :actor, :note)
+                RETURNING id
+                """
+            ),
+            {
+                "did": document["id"],
+                "version": version_no,
+                "file_name": file_name,
+                "content_type": content_type,
+                "size": len(content),
+                "storage_path": storage_path,
+                "checksum": checksum,
+                "actor": actor_user_id,
+                "note": reason,
+            },
+        )
+    ).scalar_one()
+    await document_pipeline.enqueue_processing(conn, version_id=version_id, company_id=company_id)
 
     await audit.record(
         conn,
@@ -506,6 +520,10 @@ async def download_url(
             details={"reason": "NO_STORED_VERSION"},
         )
 
+    from app.services.document_pipeline import refuse_if_infected
+
+    await refuse_if_infected(conn, document_id=uuid.UUID(str(document["id"])))
+
     client, bucket = await _storage()
     if client is None or bucket is None:
         raise BusinessRuleViolationError(
@@ -519,13 +537,16 @@ async def download_url(
         text(
             """
             INSERT INTO public.document_access_log
-              (document_id, user_id, action, ip_address, user_agent, request_id)
-            SELECT CAST(:did AS uuid), CAST(:uid AS uuid), 'DOWNLOAD', :ip, :ua, :rid
+              (document_id, user_id, company_id, access_type, ip_address,
+               user_agent, request_id)
+            VALUES (CAST(:did AS uuid), CAST(:uid AS uuid), CAST(:cid AS uuid),
+                    'DOWNLOAD', :ip, :ua, :rid)
             """
         ),
         {
             "did": document["id"],
             "uid": actor_user_id,
+            "cid": company_id,
             "ip": ip_address,
             "ua": None,
             "rid": request_id,

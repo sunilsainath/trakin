@@ -402,3 +402,30 @@ async def purge_expired_idempotency_keys() -> dict[str, int]:
         )
         removed = result.rowcount or 0
     return {"removed": removed}
+
+
+@async_task(name="app.workers.tasks.process_document_version", queue="bulk")
+async def process_document_version(version_id: str) -> dict[str, Any]:
+    """Scan, extract and classify one document version. Idempotent.
+
+    Triggered by DOCUMENT_UPLOADED outbox events and by POST
+    /documents/{id}/process. Each stage records its own state, so a retry
+    resumes rather than restarts: a CLEAN scan is never repeated.
+    """
+    import uuid as _uuid
+
+    from app.services import document_pipeline
+
+    async with session_scope() as conn:
+        already = (
+            await conn.execute(
+                text("SELECT scan_status FROM public.document_versions WHERE id = :vid"),
+                {"vid": version_id},
+            )
+        ).scalar_one_or_none()
+        if already is None:
+            return {"version_id": version_id, "skipped": "missing"}
+        result = await document_pipeline.process_version(
+            conn, version_id=_uuid.UUID(str(version_id))
+        )
+    return {"version_id": str(version_id), **result}

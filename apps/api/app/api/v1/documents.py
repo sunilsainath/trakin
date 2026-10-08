@@ -166,3 +166,22 @@ async def document_access_log(
     return await document_service.access_log(
         conn, company_id=company_scope(ctx), public_id=document_id, limit=limit
     )
+
+
+@router.post("/documents/{document_id}/process", summary="Re-drive intake pipeline")
+async def reprocess_document(ctx_and_conn: DocumentsUpload, document_id: str) -> dict[str, Any]:
+    """Re-enqueue scan -> extract -> classify for the latest version.
+
+    Intake normally runs on upload; this recovers versions stuck PENDING while
+    no worker was listening. Returns immediately: the work stays async.
+    """
+    from app.services import document_pipeline
+
+    ctx, conn = ctx_and_conn
+    return await document_pipeline.reprocess_document(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=document_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+    )

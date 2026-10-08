@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     storage_bucket_uploads: str = "uploads"
     signed_url_ttl_seconds: int = 300
     max_upload_bytes: int = 25 * 1024 * 1024
+    # Malware scanner (ClamAV INSTREAM over TCP, e.g. clamav://host:3310).
+    # Empty means unconfigured: uploads stay scan-PENDING, never fake-clean.
+    malware_scanner_url: str = ""
 
     # ----------------------------------------------------------------- mail
     email_provider: str = "resend"

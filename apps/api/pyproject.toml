@@ -26,6 +26,7 @@ dependencies = [
   "python-multipart>=0.0.12",
   "tenacity>=9.0",
   "orjson>=3.10",
+  "supabase>=2.0",
 ]
 
 [project.optional-dependencies]
