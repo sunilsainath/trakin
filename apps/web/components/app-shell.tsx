@@ -56,6 +56,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [menuOpen, setMenuOpen] = React.useState(false)
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
 
+  // The home feed renders its own three-column layout (module rail, posts,
+  // suggestions), so the global sidebar steps aside on that route. The header
+  // stays: company context, search and notifications live there.
+  const hideSidebar = pathname === '/feed'
+
   // Close the mobile drawer whenever the route changes.
   React.useEffect(() => {
     setMobileOpen(false)
@@ -98,6 +103,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             'fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-surface',
             'transition-transform duration-200 lg:static lg:translate-x-0',
             mobileOpen ? 'translate-x-0 shadow-popover' : '-translate-x-full',
+            hideSidebar && 'hidden',
           )}
         >
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
@@ -153,7 +159,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </aside>
 
-        {mobileOpen ? (
+        {mobileOpen && !hideSidebar ? (
           <div
             className="fixed inset-0 z-30 bg-foreground/40 lg:hidden"
             onClick={() => setMobileOpen(false)}
@@ -166,15 +172,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* ------------------------------------------------------------ */}
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-surface/90 px-3 backdrop-blur sm:px-5">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="lg:hidden"
-              aria-label="Open navigation"
-              onClick={() => setMobileOpen(true)}
-            >
-              <Menu />
-            </Button>
+            {hideSidebar ? null : (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="lg:hidden"
+                aria-label="Open navigation"
+                onClick={() => setMobileOpen(true)}
+              >
+                <Menu />
+              </Button>
+            )}
 
             {/* Company switcher */}
             <div className="relative">

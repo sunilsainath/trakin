@@ -6,6 +6,7 @@ import {
   Building2,
   CreditCard,
   FileText,
+  LayoutDashboard,
   LogOut,
   Sparkles,
 } from 'lucide-react'
@@ -19,6 +20,7 @@ import { RightRail } from './rail'
 
 const MODULES = [
   { href: '/time', label: 'Work', icon: Briefcase },
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/companies', label: 'Business', icon: Building2 },
   { href: '/contracts', label: 'Contracts', icon: FileText },
   { href: '/payments', label: 'Payments', icon: CreditCard },
