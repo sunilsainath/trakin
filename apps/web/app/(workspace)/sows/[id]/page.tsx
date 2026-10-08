@@ -24,9 +24,9 @@ import {
 import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
 import { PublicId } from '@/components/public-id'
-import { ConfirmOnlyDialog, DecisionDialog, ReasonDialog } from '@/components/destructive'
+import { ConfirmOnlyDialog, DecisionDialog, NoteDialog, ReasonDialog } from '@/components/destructive'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingBlock, useCompanyQuery } from '@/components/query'
+import { ErrorState, LoadingBlock, PermissionState, isPermissionError, useCompanyQuery } from '@/components/query'
 import { notifyError, notifySuccess } from '@/components/toast'
 
 /**
@@ -56,7 +56,9 @@ export default function SowDetailPage() {
     enabled: tab === 'history',
   })
 
-  const [dialog, setDialog] = React.useState<'submit' | 'approve' | 'reject' | 'terminate' | null>(null)
+  const [dialog, setDialog] = React.useState<
+    'submit' | 'approve' | 'reject' | 'terminate' | 'send' | 'acknowledge' | 'accept' | 'decline' | 'reopen' | null
+  >(null)
 
   const act = useCompanyMutation<Sow, { path: string; reason: string | null }>({
     context: { companyPublicId: activeCompanyPublicId },
@@ -89,7 +91,11 @@ export default function SowDetailPage() {
     return (
       <PageShell>
         <div className="space-y-4">
-          <ErrorState error={sow.error} onRetry={() => void sow.refetch()} />
+          {isPermissionError(sow.error) ? (
+            <PermissionState error={sow.error} />
+          ) : (
+            <ErrorState error={sow.error} onRetry={() => void sow.refetch()} />
+          )}
           <Link href="/sows" className="text-sm font-medium text-primary hover:underline">
             Back to statements of work
           </Link>
@@ -123,6 +129,37 @@ export default function SowDetailPage() {
       .mutateAsync({ path: `/sows/${sowId}/terminate`, reason })
       .catch((cause) => notifyError(cause, 'The SOW could not be terminated.'))
 
+  const send = (notes: string | null) =>
+    act
+      .mutateAsync({ path: `/sows/${sowId}/send`, reason: notes })
+      .catch((cause) => notifyError(cause, 'The SOW could not be sent.'))
+
+  const acknowledge = async () => {
+    try {
+      await act.mutateAsync({ path: `/sows/${sowId}/acknowledge`, reason: null })
+    } catch (cause) {
+      notifyError(cause, 'The SOW could not be acknowledged.')
+    }
+  }
+
+  const accept = (notes: string | null) =>
+    act
+      .mutateAsync({ path: `/sows/${sowId}/accept`, reason: notes })
+      .catch((cause) => notifyError(cause, 'The SOW could not be accepted.'))
+
+  const decline = (notes: string | null) =>
+    act
+      .mutateAsync({ path: `/sows/${sowId}/decline`, reason: notes })
+      .catch((cause) => notifyError(cause, 'The SOW could not be declined.'))
+
+  const reopen = async () => {
+    try {
+      await act.mutateAsync({ path: `/sows/${sowId}/reopen`, reason: null })
+    } catch (cause) {
+      notifyError(cause, 'The SOW could not be reopened.')
+    }
+  }
+
   return (
     <PageShell width="wide">
       <div className="space-y-6">
@@ -142,6 +179,11 @@ export default function SowDetailPage() {
                   Submit for approval
                 </Button>
               ) : null}
+              {can('sows.approve') && data.status === 'DRAFT' ? (
+                <Button variant="outline" size="sm" onClick={() => setDialog('send')} loading={act.isPending}>
+                  Send to counterparty
+                </Button>
+              ) : null}
               {can('sows.approve') && data.status === 'PENDING_APPROVAL' ? (
                 <>
                   <Button
@@ -157,6 +199,43 @@ export default function SowDetailPage() {
                     Return to draft
                   </Button>
                 </>
+              ) : null}
+              {can('sows.approve') && data.status === 'SENT' ? (
+                <>
+                  <Button
+                    variant="success"
+                    size="sm"
+                    onClick={() => setDialog('acknowledge')}
+                    loading={act.isPending}
+                  >
+                    <Check aria-hidden />
+                    Acknowledge
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setDialog('decline')}>
+                    Decline
+                  </Button>
+                </>
+              ) : null}
+              {can('sows.approve') && data.status === 'PENDING_ACCEPTANCE' ? (
+                <>
+                  <Button
+                    variant="success"
+                    size="sm"
+                    onClick={() => setDialog('accept')}
+                    loading={act.isPending}
+                  >
+                    <Check aria-hidden />
+                    Accept
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setDialog('decline')}>
+                    Decline
+                  </Button>
+                </>
+              ) : null}
+              {can('sows.approve') && data.status === 'REJECTED' ? (
+                <Button variant="outline" size="sm" onClick={() => setDialog('reopen')} loading={act.isPending}>
+                  Reopen for revision
+                </Button>
               ) : null}
               {can('sows.approve') && !['TERMINATED', 'CLOSED'].includes(data.status) ? (
                 <Button
@@ -236,6 +315,65 @@ export default function SowDetailPage() {
           busy={act.isPending}
           error={act.isError ? act.error : null}
           onConfirm={terminate}
+        />
+
+        <NoteDialog
+          open={dialog === 'send'}
+          onOpenChange={(open) => setDialog(open ? 'send' : null)}
+          title="Send to counterparty"
+          description="Sending transmits this SOW for acceptance. Its scope and rates freeze while it is with the counterparty."
+          label="Note for the counterparty (optional)"
+          confirmLabel="Send SOW"
+          busy={act.isPending}
+          error={act.isError ? act.error : null}
+          onConfirm={send}
+        />
+
+        <ConfirmOnlyDialog
+          open={dialog === 'acknowledge'}
+          onOpenChange={(open) => setDialog(open ? 'acknowledge' : null)}
+          title="Acknowledge receipt"
+          description="Confirm the counterparty has this SOW under review. It can then be accepted or declined."
+          confirmLabel="Acknowledge"
+          busy={act.isPending}
+          error={act.isError ? act.error : null}
+          onConfirm={acknowledge}
+        />
+
+        <DecisionDialog
+          open={dialog === 'accept'}
+          onOpenChange={(open) => setDialog(open ? 'accept' : null)}
+          decision="APPROVED"
+          title="Accept this statement of work"
+          description="Accepting activates the SOW and generates its contracts. The decision is recorded against your identity."
+          confirmLabel="Accept SOW"
+          busy={act.isPending}
+          error={act.isError ? act.error : null}
+          onConfirm={accept}
+        />
+
+        <DecisionDialog
+          open={dialog === 'decline'}
+          onOpenChange={(open) => setDialog(open ? 'decline' : null)}
+          decision="REJECTED"
+          title="Decline this statement of work"
+          description="The SOW returns with your reason recorded. It is never deleted and can be revised and sent again."
+          confirmLabel="Decline SOW"
+          notesLabel="Reason for declining"
+          busy={act.isPending}
+          error={act.isError ? act.error : null}
+          onConfirm={decline}
+        />
+
+        <ConfirmOnlyDialog
+          open={dialog === 'reopen'}
+          onOpenChange={(open) => setDialog(open ? 'reopen' : null)}
+          title="Reopen for revision"
+          description="A declined SOW returns to draft so its scope or rates can be revised, then sent again."
+          confirmLabel="Reopen SOW"
+          busy={act.isPending}
+          error={act.isError ? act.error : null}
+          onConfirm={reopen}
         />
       </div>
     </PageShell>

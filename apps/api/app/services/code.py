@@ -33,6 +33,7 @@ from app.core.errors import (
 from app.core.logging import get_logger
 from app.services import audit
 from app.services.lookup import (
+    apply_status_filter,
     as_decimal,
     json_or_empty,
     resolve_company_public_id,
@@ -59,13 +60,30 @@ CONTRACT_TRANSITIONS: dict[str, tuple[str, ...]] = {
 }
 
 SOW_TRANSITIONS: dict[str, tuple[str, ...]] = {
-    "DRAFT": ("PENDING_APPROVAL", "CLOSED"),
+    "DRAFT": ("PENDING_APPROVAL", "SENT", "CLOSED"),
     "PENDING_APPROVAL": ("ACTIVE", "DRAFT", "CLOSED"),
+    "SENT": ("PENDING_ACCEPTANCE", "DRAFT", "REJECTED", "CLOSED"),
+    "PENDING_ACCEPTANCE": ("ACTIVE", "REJECTED", "CLOSED"),
     "ACTIVE": ("EXPIRED", "TERMINATED", "CLOSED"),
+    "REJECTED": ("DRAFT", "CLOSED"),
     "EXPIRED": ("CLOSED",),
     "TERMINATED": ("CLOSED",),
     "CLOSED": (),
 }
+
+PROJECT_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "DRAFT": ("PLANNING", "ACTIVE", "CANCELLED", "CLOSED"),
+    "PLANNING": ("ACTIVE", "CANCELLED", "CLOSED"),
+    "ACTIVE": ("ON_HOLD", "COMPLETED", "CANCELLED", "CLOSED"),
+    "ON_HOLD": ("ACTIVE", "CANCELLED", "CLOSED"),
+    "COMPLETED": ("CLOSED",),
+    "CANCELLED": ("CLOSED",),
+    "CLOSED": (),
+}
+
+# Terminal project states are read-only: a COMPLETED, CANCELLED or CLOSED
+# project keeps its history but accepts no further edits of any kind.
+PROJECT_READ_ONLY = frozenset({"COMPLETED", "CANCELLED", "CLOSED"})
 
 # The contract states that can carry commercial terms and therefore may be edited.
 CONTRACT_EDITABLE = frozenset({"DRAFT"})
@@ -236,9 +254,7 @@ async def list_projects(
     if search:
         where.append("(p.name ILIKE :q OR p.description ILIKE :q)")
         params["q"] = f"%{search}%"
-    if status:
-        where.append("p.status = :status")
-        params["status"] = status
+    apply_status_filter(where, params, "p.status", status)
     if owner_user_id:
         resolved = await resolve_user_public_id(conn, owner_user_id, company_id=company_id)
         where.append("p.owner_user_id = :owner")
@@ -294,7 +310,9 @@ async def get_project(
     )
     if row is None:
         raise ResourceNotFoundError("Project not found.")
-    return _project_from_row(row, await _company_public_id(conn, company_id))
+    data = _project_from_row(row, await _company_public_id(conn, company_id))
+    data["allowed_transitions"] = list(PROJECT_TRANSITIONS.get(str(data["status"]), ()))
+    return data
 
 
 async def create_project(
@@ -306,16 +324,31 @@ async def create_project(
     ip_address: str | None,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    owner_id = (
-        await resolve_user_public_id(conn, payload["owner_user_id"], company_id=company_id)
-        if payload.get("owner_user_id")
-        else actor_user_id
-    )
-    client_id = (
-        await resolve_company_public_id(conn, payload["counterparty_company_id"])
-        if payload.get("counterparty_company_id")
-        else None
-    )
+    category = payload.get("category", "COMPANY")
+    if category == "INDIVIDUAL":
+        # An individual project belongs to its creator alone: the owner is
+        # always the actor, never another user's id, and no counterparty
+        # company is recorded on it.
+        owner_id = actor_user_id
+        client_id = None
+    else:
+        owner_id = (
+            await resolve_user_public_id(conn, payload["owner_user_id"], company_id=company_id)
+            if payload.get("owner_user_id")
+            else actor_user_id
+        )
+        client_id = (
+            await resolve_company_public_id(conn, payload["counterparty_company_id"])
+            if payload.get("counterparty_company_id")
+            else None
+        )
+
+    initial_status = payload.get("status", "DRAFT")
+    if initial_status != "DRAFT":
+        raise ValidationError(
+            "Projects are created DRAFT; activate them through the status transition.",
+            details={"status": initial_status, "reason": "PROJECT_MUST_START_DRAFT"},
+        )
 
     metadata = dict(payload.get("metadata") or {})
     if client_id is not None:
@@ -346,8 +379,8 @@ async def create_project(
                     "name": payload["name"],
                     "description": payload.get("description"),
                     "project_type": payload.get("project_type", "SERVICE"),
-                    "category": payload.get("category", "COMPANY"),
-                    "status": payload.get("status", "DRAFT"),
+                    "category": category,
+                    "status": "DRAFT",
                     "start_date": payload.get("start_date"),
                     "estimated_end_date": payload.get("estimated_end_date"),
                     "estimated_hours": payload.get("estimated_hours"),
@@ -375,7 +408,7 @@ async def create_project(
         actor_user_id=actor_user_id,
         new_values={
             "name": payload["name"],
-            "status": payload.get("status", "DRAFT"),
+            "status": "DRAFT",
             "currency": payload.get("currency", "USD"),
             "billing_basis": payload.get("billing_basis", "TIMESHEET"),
         },
@@ -416,7 +449,16 @@ async def update_project(
 ) -> dict[str, Any]:
     before = await resolve_scoped(conn, "projects", public_id, company_id, columns="*", lock=True)
 
+    current_status = str(before["status"])
+    if current_status in PROJECT_READ_ONLY:
+        raise BusinessRuleViolationError(
+            f"A {current_status} project is read-only.",
+            details={"status": current_status, "reason": "PROJECT_READ_ONLY"},
+        )
+
     updates = {k: v for k, v in changes.items() if k in _PROJECT_UPDATABLE and v is not None}
+    if updates.get("status") is not None and str(updates["status"]) != current_status:
+        _assert_transition(PROJECT_TRANSITIONS, current_status, str(updates["status"]), "Project")
     if "owner_user_id" in updates:
         updates["owner_user_id"] = await resolve_user_public_id(
             conn, str(updates["owner_user_id"]), company_id=company_id
@@ -1022,9 +1064,7 @@ async def list_sows(
         project = await resolve_scoped(conn, "projects", project_public_id, company_id)
         where.append("s.project_id = :pid")
         params["pid"] = project["id"]
-    if status:
-        where.append("s.status = :status")
-        params["status"] = status
+    apply_status_filter(where, params, "s.status", status)
     if search:
         where.append("(s.title ILIKE :q OR s.description ILIKE :q)")
         params["q"] = f"%{search}%"
@@ -1355,6 +1395,126 @@ async def update_sow(
     return await get_sow(conn, company_id=company_id, public_id=public_id)
 
 
+async def _require_sow_roles(conn: AsyncConnection, sow_id: uuid.UUID) -> None:
+    """A SOW without priced roles can neither be activated nor sent out."""
+    roles = await conn.execute(
+        text("SELECT count(*) FROM public.sow_roles WHERE sow_id = :sid"),
+        {"sid": sow_id},
+    )
+    if _num(roles.scalar()) == 0:
+        raise BusinessRuleViolationError(
+            "A SOW needs at least one project role before it can be activated.",
+            details={"reason": "SOW_HAS_NO_ROLES"},
+        )
+
+
+async def send_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Transmit a DRAFT SOW to its counterparty for acceptance.
+
+    Sending needs a counterparty to receive it and priced roles to accept;
+    both are checked before the status moves so a SENT SOW is always
+    answerable.
+    """
+    before = await resolve_scoped(conn, "sows", public_id, company_id)
+    if not before["counterparty_company_id"] and not before["counterparty_user_id"]:
+        raise BusinessRuleViolationError(
+            "A SOW needs a counterparty before it can be sent.",
+            details={"reason": "SOW_HAS_NO_COUNTERPARTY"},
+        )
+    await _require_sow_roles(conn, before["id"])
+    return await transition_sow(
+        conn,
+        company_id=company_id,
+        public_id=public_id,
+        target="SENT",
+        actor_user_id=actor_user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+        reason=reason,
+    )
+
+
+async def reopen_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    """Return a REJECTED SOW to DRAFT so it can be revised and sent again."""
+    return await transition_sow(
+        conn,
+        company_id=company_id,
+        public_id=public_id,
+        target="DRAFT",
+        actor_user_id=actor_user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+
+
+async def acknowledge_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    """Record that the counterparty has the SOW under review."""
+    return await transition_sow(
+        conn,
+        company_id=company_id,
+        public_id=public_id,
+        target="PENDING_ACCEPTANCE",
+        actor_user_id=actor_user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+
+
+async def respond_to_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    public_id: str,
+    accept: bool,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Counterparty acceptance or rejection of a SOW under review.
+
+    Acceptance activates the SOW, which generates its contracts; rejection
+    returns it with the reason recorded in the audit trail, so it can be
+    revised and sent again. A declined SOW is never deleted.
+    """
+    target = "ACTIVE" if accept else "REJECTED"
+    return await transition_sow(
+        conn,
+        company_id=company_id,
+        public_id=public_id,
+        target=target,
+        actor_user_id=actor_user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+        reason=notes,
+    )
+
+
 async def transition_sow(
     conn: AsyncConnection,
     *,
@@ -1373,15 +1533,7 @@ async def transition_sow(
     if target == "ACTIVE":
         # The database guard on_sow_role_change drops role bindings when a SOW is
         # closed, so make sure a contract-ready SOW still has roles to bill.
-        roles = await conn.execute(
-            text("SELECT count(*) FROM public.sow_roles WHERE sow_id = :sid"),
-            {"sid": before["id"]},
-        )
-        if _num(roles.scalar()) == 0:
-            raise BusinessRuleViolationError(
-                "A SOW needs at least one project role before it can be activated.",
-                details={"reason": "SOW_HAS_NO_ROLES"},
-            )
+        await _require_sow_roles(conn, before["id"])
 
     await conn.execute(
         text("UPDATE public.sows SET status = :target WHERE id = :rid"),
@@ -1415,6 +1567,21 @@ async def transition_sow(
                 request_id=request_id,
                 ip_address=ip_address,
             )
+
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="SOW_STATUS_CHANGED",
+        aggregate_type="sow",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=current,
+        new=target,
+        idempotency_key=f"sow:{public_id}:{target}",
+    )
 
     await audit.record(
         conn,

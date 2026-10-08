@@ -19,9 +19,21 @@ CurrencyCode = str
 BillingBasis = Literal["TIMESHEET", "FIXED", "RECURRING", "USAGE", "MILESTONE"]
 BillingFrequency = Literal["WEEKLY", "BIWEEKLY", "MONTHLY", "QUARTERLY", "CUSTOM"]
 ProjectCategory = Literal["COMPANY", "INDIVIDUAL"]
-ProjectStatus = Literal["DRAFT", "PLANNING", "ACTIVE", "ON_HOLD", "COMPLETED", "CANCELLED"]
+ProjectStatus = Literal[
+    "DRAFT", "PLANNING", "ACTIVE", "ON_HOLD", "COMPLETED", "CANCELLED", "CLOSED"
+]
 ProjectRoleStatus = Literal["OPEN", "FILLED", "CLOSED", "ON_HOLD"]
-SowStatus = Literal["DRAFT", "PENDING_APPROVAL", "ACTIVE", "EXPIRED", "TERMINATED", "CLOSED"]
+SowStatus = Literal[
+    "DRAFT",
+    "PENDING_APPROVAL",
+    "SENT",
+    "PENDING_ACCEPTANCE",
+    "ACTIVE",
+    "REJECTED",
+    "EXPIRED",
+    "TERMINATED",
+    "CLOSED",
+]
 ContractStatus = Literal[
     "DRAFT",
     "SENT",
@@ -145,6 +157,7 @@ class ProjectResponse(BaseModel):
     contract_count: int = 0
     active_contract_count: int = 0
     timesheet_count: int = 0
+    allowed_transitions: list[str] = Field(default_factory=list)
     last_activity_at: dt.datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: dt.datetime
@@ -621,6 +634,7 @@ class ContractResponse(BaseModel):
 class ContractActionRequest(_Strict):
     notes: str | None = Field(default=None, max_length=4000)
     reason: str | None = Field(default=None, max_length=4000)
+    effective_date: dt.date | None = None
 
 
 class ContractVersionResponse(BaseModel):

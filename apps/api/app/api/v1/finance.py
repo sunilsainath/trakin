@@ -113,7 +113,8 @@ def _cursor(raw: str | None) -> dict[str, str]:
 @router.get("/invoices", response_model=Page[InvoiceResponse], summary="List invoices")
 async def list_invoices(
     ctx_and_conn: InvoicesRead,
-    status_filter: str | None = Query(None, alias="status", max_length=32),
+    status_filter: str | None = Query(None, alias="status", max_length=64),
+    direction: str | None = Query(None, pattern="^(RECEIVABLE|PAYABLE)$"),
     project_id: str | None = Query(None, max_length=32),
     contract_id: str | None = Query(None, max_length=32),
     counterparty_company_id: str | None = Query(None, max_length=32),
@@ -131,6 +132,7 @@ async def list_invoices(
         company_id=company_scope(ctx),
         status=status_filter,
         statuses=None,
+        direction=direction,
         project_public_id=project_id,
         contract_public_id=contract_id,
         counterparty_company_id=counterparty_company_id,

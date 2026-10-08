@@ -102,6 +102,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           className={cn(
             'fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-surface',
             'transition-transform duration-200 lg:static lg:translate-x-0',
+            'print:hidden',
             mobileOpen ? 'translate-x-0 shadow-popover' : '-translate-x-full',
             hideSidebar && 'hidden',
           )}
@@ -171,7 +172,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* Main column                                                    */}
         {/* ------------------------------------------------------------ */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-surface/90 px-3 backdrop-blur sm:px-5">
+          <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-surface/90 px-3 backdrop-blur sm:px-5 print:hidden">
             {hideSidebar ? null : (
               <Button
                 variant="ghost"

@@ -53,6 +53,24 @@ async def list_documents(
     return {"data": rows, "meta": {"limit": limit, "offset": offset}, "request_id": ctx.request_id}
 
 
+@router.get(
+    "/documents/for/{entity}/{public_id}",
+    summary="Documents attached to one entity",
+)
+async def list_entity_documents(
+    ctx_and_conn: DocumentsRead, entity: str, public_id: str
+) -> dict[str, Any]:
+    """Project, SOW, contract or invoice attachments, newest first."""
+    ctx, conn = ctx_and_conn
+    rows = await document_service.list_documents_for_entity(
+        conn,
+        company_id=company_scope(ctx),
+        entity=entity,
+        entity_public_id=public_id,
+    )
+    return {"data": rows, "request_id": ctx.request_id}
+
+
 @router.post(
     "/documents",
     status_code=status.HTTP_201_CREATED,

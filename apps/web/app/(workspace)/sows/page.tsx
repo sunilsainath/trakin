@@ -7,7 +7,7 @@ import { FileSignature } from 'lucide-react'
 import { useCompany } from '@/hooks/use-company'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { SOW_STATUSES, type Page as PageEnvelope, type Sow } from '@/lib/domain-types'
-import { Button, EmptyState } from '@/components/ui'
+import { Button, EmptyState, Tabs } from '@/components/ui'
 import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
 import { PublicId } from '@/components/public-id'
@@ -19,7 +19,7 @@ import {
   useDebouncedValue,
 } from '@/components/filters'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingTable } from '@/components/query'
+import { ErrorState, LoadingTable, PermissionState, isPermissionError } from '@/components/query'
 
 /**
  * Every statement of work in the company.
@@ -27,6 +27,33 @@ import { ErrorState, LoadingTable } from '@/components/query'
  * `q` is debounced before it reaches the API: a request per keystroke over a
  * growing result set is the difference between a fast list and a stalled one.
  */
+const SOW_TABS = [
+  { key: 'all', label: 'All' },
+  { key: 'ACTIVE', label: 'Active' },
+  { key: 'DRAFT', label: 'Draft' },
+  { key: 'PENDING_APPROVAL,PENDING_ACCEPTANCE,SENT', label: 'Pending' },
+  { key: 'REJECTED', label: 'Rejected' },
+  { key: 'CLOSED', label: 'Closed' },
+] as const
+
+function SowStatusTabs({
+  status,
+  onSelect,
+}: {
+  status: string
+  onSelect: (value: string) => void
+}) {
+  const active = SOW_TABS.some((tab) => tab.key === status) ? status : 'all'
+  return (
+    <Tabs
+      tabs={[...SOW_TABS]}
+      active={active}
+      onChange={(key) => onSelect(key === 'all' ? '' : key)}
+      className="overflow-x-auto scrollbar-thin"
+    />
+  )
+}
+
 export default function SowsPage() {
   const { activeCompanyPublicId, can } = useCompany()
   const [search, setSearch] = React.useState('')
@@ -158,10 +185,19 @@ export default function SowsPage() {
           />
         </FilterBar>
 
+        <SowStatusTabs
+          status={(list.filters.status as string) ?? ''}
+          onSelect={(value) => list.setFilter('status', value)}
+        />
+
         {list.query.isPending ? (
           <LoadingTable rows={8} columns={6} />
         ) : list.query.isError ? (
-          <ErrorState error={list.query.error} onRetry={() => void list.query.refetch()} />
+          isPermissionError(list.query.error) ? (
+            <PermissionState error={list.query.error} />
+          ) : (
+            <ErrorState error={list.query.error} onRetry={() => void list.query.refetch()} />
+          )
         ) : (
           <>
             <DataTable

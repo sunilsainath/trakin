@@ -54,7 +54,7 @@ import { PublicId } from '@/components/public-id'
 import { HealthScore, Metric, StatusBadge } from '@/components/badges'
 import { ReasonDialog } from '@/components/destructive'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingBlock, useCompanyQuery } from '@/components/query'
+import { ErrorState, LoadingBlock, PermissionState, isPermissionError, useCompanyQuery } from '@/components/query'
 import { notifyError, notifySuccess } from '@/components/toast'
 
 /**
@@ -105,7 +105,11 @@ export function ProjectDetail({ initialTab }: { initialTab?: ProjectTab }) {
     return (
       <PageShell>
         <div className="space-y-4">
-          <ErrorState error={query.error} onRetry={() => void query.refetch()} />
+          {isPermissionError(query.error) ? (
+            <PermissionState error={query.error} />
+          ) : (
+            <ErrorState error={query.error} onRetry={() => void query.refetch()} />
+          )}
           <Link href="/projects" className="text-sm font-medium text-primary hover:underline">
             Back to projects
           </Link>
@@ -1717,12 +1721,17 @@ function EditProjectDialog({
           </Field>
           <Field label="Status">
             <Select id="edit-project-status" value={status} onChange={(event) => setStatus(event.target.value)}>
-              {['DRAFT', 'PLANNING', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED'].map((value) => (
+              {[project.status, ...(project.allowed_transitions ?? [])].map((value) => (
                 <option key={value} value={value}>
                   {statusLabel(value)}
                 </option>
               ))}
             </Select>
+            {(project.allowed_transitions ?? []).length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                This project is in a terminal state and its status cannot change.
+              </p>
+            ) : null}
           </Field>
         </form>
       </Dialog>

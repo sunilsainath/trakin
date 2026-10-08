@@ -918,6 +918,21 @@ async def record_payment(
     public_id = str(row["public_id"])
     internal = await resolve_scoped(conn, "payments", public_id, company_id)
 
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="PAYMENT_RECORDED",
+        aggregate_type="payment",
+        aggregate_id=internal["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=None,
+        new="RECORDED",
+        idempotency_key=f"payment:{public_id}:recorded",
+    )
+
     await audit.record(
         conn,
         action="payment.recorded",

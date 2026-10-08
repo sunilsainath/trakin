@@ -24,6 +24,7 @@ import {
   EmptyState,
   Input,
   Select,
+  Tabs,
   Textarea,
 } from '@/components/ui'
 import { CurrencySelect, DateInput, Field, FieldGrid } from '@/components/forms'
@@ -32,7 +33,7 @@ import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
 import { FilterBar, FilterInput, FilterSelect, useDebouncedValue } from '@/components/filters'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingTable, useCompanyQuery } from '@/components/query'
+import { ErrorState, LoadingTable, PermissionState, isPermissionError, useCompanyQuery } from '@/components/query'
 
 /* -------------------------------------------------------------------------- */
 /* Create project                                                             */
@@ -359,14 +360,15 @@ export default function ProjectsPage() {
 }
 
 function ProjectsList() {
-  const { activeCompanyPublicId } = useCompany()
+  const { activeCompanyPublicId, me } = useCompany()
 
   const [status, setStatus] = React.useState('')
+  const [owner, setOwner] = React.useState('')
   const [search, setSearch] = React.useState('')
   const debouncedSearch = useDebouncedValue(search.trim())
   const [sort, setSort] = React.useState<{ key: string; direction: 'asc' | 'desc' } | null>(null)
 
-  const resetKey = `${status}|${debouncedSearch}`
+  const resetKey = `${status}|${owner}|${debouncedSearch}`
   const [cursor, setCursor] = React.useState<string | null>(null)
   const [history, setHistory] = React.useState<Array<string | null>>([null])
 
@@ -378,15 +380,16 @@ function ProjectsList() {
   const queryParams = React.useMemo(() => {
     const params = new URLSearchParams()
     if (status) params.set('status', status)
+    if (owner) params.set('owner_user_id', owner)
     if (debouncedSearch) params.set('q', debouncedSearch)
     params.set('limit', '25')
     if (cursor) params.set('cursor', cursor)
     return `?${params.toString()}`
-  }, [status, debouncedSearch, cursor])
+  }, [status, owner, debouncedSearch, cursor])
 
   const query = useCompanyQuery<PageEnvelope<Project>>({
     companyPublicId: activeCompanyPublicId,
-    queryKey: ['projects', 'list', status, debouncedSearch, cursor],
+    queryKey: ['projects', 'list', status, owner, debouncedSearch, cursor],
     path: '/projects',
     queryParams,
   })
@@ -476,10 +479,25 @@ function ProjectsList() {
   if (query.isPending) return <LoadingTable rows={8} columns={6} />
 
   if (query.isError) {
-    return <ErrorState error={query.error} onRetry={() => void query.refetch()} />
+    return isPermissionError(query.error) ? (
+      <PermissionState error={query.error} />
+    ) : (
+      <ErrorState error={query.error} onRetry={() => void query.refetch()} />
+    )
   }
 
-  const activeFilters = (status ? 1 : 0) + (debouncedSearch ? 1 : 0)
+  const activeFilters = (status ? 1 : 0) + (owner ? 1 : 0) + (debouncedSearch ? 1 : 0)
+
+  const activeTab = owner ? 'mine' : status || 'all'
+  const selectTab = (key: string) => {
+    if (key === 'mine') {
+      setOwner(me?.public_id ?? '')
+      setStatus('')
+    } else {
+      setOwner('')
+      setStatus(key === 'all' ? '' : key)
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -487,6 +505,7 @@ function ProjectsList() {
         activeCount={activeFilters}
         onClear={() => {
           setStatus('')
+          setOwner('')
           setSearch('')
         }}
       >
@@ -507,6 +526,20 @@ function ProjectsList() {
           className="w-44"
         />
       </FilterBar>
+
+      <Tabs
+        tabs={[
+          { key: 'all', label: 'All' },
+          { key: 'mine', label: 'Mine' },
+          { key: 'ACTIVE', label: 'Active' },
+          { key: 'DRAFT', label: 'Draft' },
+          { key: 'ON_HOLD', label: 'On hold' },
+          { key: 'COMPLETED', label: 'Completed' },
+        ]}
+        active={['all', 'mine', 'ACTIVE', 'DRAFT', 'ON_HOLD', 'COMPLETED'].includes(activeTab) ? activeTab : 'all'}
+        onChange={selectTab}
+        className="overflow-x-auto scrollbar-thin"
+      />
 
       <DataTable
         columns={columns}
@@ -546,6 +579,7 @@ function ProjectsList() {
                   variant="outline"
                   onClick={() => {
                     setStatus('')
+                    setOwner('')
                     setSearch('')
                   }}
                 >

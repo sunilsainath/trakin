@@ -517,6 +517,21 @@ async def transition(
         {"target": target, "actor": actor_user_id, "rid": msa["id"]},
     )
 
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="MSA_STATUS_CHANGED",
+        aggregate_type="msa",
+        aggregate_id=msa["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=current,
+        new=target,
+        idempotency_key=f"msa:{public_id}:{target}",
+    )
+
     await audit.record(
         conn,
         action=f"msa.{target.lower()}",
@@ -656,6 +671,21 @@ async def create_request(
             text("UPDATE public.msas SET status = 'MSA_REQUESTED' WHERE id = :rid"),
             {"rid": msa["id"]},
         )
+
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="MSA_STATUS_CHANGED",
+        aggregate_type="msa",
+        aggregate_id=msa["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=str(msa["status"]),
+        new="MSA_REQUESTED",
+        idempotency_key=f"msa:{public_id}:MSA_REQUESTED",
+    )
 
     await audit.record(
         conn,

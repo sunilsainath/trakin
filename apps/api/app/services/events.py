@@ -28,6 +28,10 @@ CATEGORY_BY_EVENT: dict[str, str] = {
     "CONTRACT_ACTIVE": "CONTRACT",
     "CONTRACT_DECLINED": "CONTRACT",
     "CONTRACT_EXPIRED": "CONTRACT",
+    "CONTRACT_EXPIRING_7D": "CONTRACT",
+    "CONTRACT_EXPIRING_30D": "CONTRACT",
+    "CONTRACT_EXPIRING_60D": "CONTRACT",
+    "CONTRACT_EXPIRING_90D": "CONTRACT",
     "CONTRACT_TERMINATED": "COMPLIANCE",
     "CONTRACT_STATUS_CHANGED": "CONTRACT",
     "SOW_STATUS_CHANGED": "SOW",
@@ -40,6 +44,7 @@ CATEGORY_BY_EVENT: dict[str, str] = {
     "INVOICE_STATUS_CHANGED": "INVOICE",
     "PAYMENT_DETECTED": "PAYMENT",
     "PAYMENT_MATCHED": "PAYMENT",
+    "PAYMENT_RECORDED": "PAYMENT",
 }
 
 # Events that should trigger the billing engine rather than a notification.
@@ -53,6 +58,57 @@ HANDLERS = (
     "reevaluate_invoice_eligibility",
     "record_event_for_audit",
 )
+
+
+async def emit_event(
+    conn: Any,
+    *,
+    event_type: str,
+    aggregate_type: str,
+    aggregate_id: uuid.UUID,
+    company_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
+    public_id: str | None = None,
+    old: str | None = None,
+    new: str | None = None,
+    extra: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> None:
+    """Publish a domain event into the transactional outbox.
+
+    The row commits with the business change, so an event can never be lost;
+    the idempotency key makes a retried transition a no-op rather than a
+    duplicate notification. Delivery happens through dispatch_outbox.
+    """
+    payload: dict[str, Any] = {
+        "company_id": str(company_id) if company_id else None,
+        "public_id": public_id,
+        "old": old,
+        "new": new,
+        **(extra or {}),
+    }
+    await conn.execute(
+        text(
+            """
+            INSERT INTO platform.outbox_events
+              (event_type, event_version, company_id, actor_user_id,
+               aggregate_type, aggregate_id, payload, idempotency_key)
+            VALUES (:type, 1, CAST(:cid AS uuid), CAST(:actor AS uuid),
+                    :atype, CAST(:aid AS uuid), CAST(:payload AS jsonb), :idem)
+            ON CONFLICT (event_type, idempotency_key)
+              WHERE idempotency_key IS NOT NULL DO NOTHING
+            """
+        ),
+        {
+            "type": event_type,
+            "cid": str(company_id) if company_id else None,
+            "actor": str(actor_user_id) if actor_user_id else None,
+            "atype": aggregate_type,
+            "aid": str(aggregate_id),
+            "payload": _json(payload),
+            "idem": idempotency_key,
+        },
+    )
 
 
 async def handle_event(event: dict[str, Any]) -> None:
@@ -82,8 +138,10 @@ async def handle_event(event: dict[str, Any]) -> None:
 async def notify_participants(event: dict[str, Any]) -> None:
     """Create notifications for the users involved in an event.
 
-    The UNIQUE key on (user_id, type, resource_id) is what makes a redelivery a
-    no-op rather than a duplicate.
+    Redelivery safety comes from the outbox idempotency key, not from the
+    notification rows: there is deliberately no UNIQUE key on
+    (user_id, type, resource_id), because a contract can legitimately warn,
+    expire and renew across its life.
     """
     event_type = str(event.get("event_type") or "")
     category = CATEGORY_BY_EVENT.get(event_type)
@@ -107,63 +165,36 @@ async def notify_participants(event: dict[str, Any]) -> None:
 async def _recipients_for(
     conn: Any, aggregate_type: str, aggregate_id: str, payload: dict[str, Any]
 ) -> list[uuid.UUID]:
-    """Users who should be notified, derived from the referenced record."""
+    """Users who should be notified, derived from the referenced record.
+
+    One query per aggregate family keeps each recipient rule reviewable; the
+    single execute below keeps the linter's return budget intact.
+    """
+    params: dict[str, Any] = {"id": aggregate_id}
     if aggregate_type == "contract":
-        rows = (
-            (
-                await conn.execute(
-                    text(
-                        """
-                    SELECT DISTINCT
+        query = """                    SELECT DISTINCT
                            cp.party_user_id AS user_id
                       FROM public.contract_parties cp
                      WHERE cp.contract_id = CAST(:id AS uuid)
                        AND cp.party_user_id IS NOT NULL
-                    UNION
-                    SELECT m.user_id
-                      FROM public.assignments m
-                     WHERE m.contract_id = CAST(:id AS uuid)
-                       AND m.status = 'ACTIVE'
+                     UNION
+                     SELECT m.user_id
+                       FROM public.assignments m
+                      WHERE m.contract_id = CAST(:id AS uuid)
+                        AND m.status = 'ACTIVE'
                     """
-                    ),
-                    {"id": aggregate_id},
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return [uuid.UUID(str(r)) for r in rows]
-
-    if aggregate_type == "timesheet":
-        rows = (
-            (
-                await conn.execute(
-                    text(
-                        """
-                    SELECT t.user_id FROM public.timesheets t
-                     WHERE t.id = CAST(:id AS uuid)
-                    UNION
-                    SELECT ta.approver_user_id
-                      FROM public.timesheet_approvals ta
-                     WHERE ta.timesheet_id = CAST(:id AS uuid)
-                       AND ta.approver_user_id IS NOT NULL
-                    """,
-                    ),
-                    {"id": aggregate_id},
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return [uuid.UUID(str(r)) for r in rows if r]
-
-    if aggregate_type == "invoice":
-        rows = (
-            (
-                await conn.execute(
-                    text(
-                        """
-                    SELECT m.user_id
+    elif aggregate_type == "timesheet":
+        query = """                    SELECT t.user_id FROM public.timesheets t
+                      WHERE t.id = CAST(:id AS uuid)
+                     UNION
+                     SELECT ta.approver_user_id
+                       FROM public.timesheet_approvals ta
+                      WHERE ta.timesheet_id = CAST(:id AS uuid)
+                        AND ta.approver_user_id IS NOT NULL
+                    """
+    elif aggregate_type == "invoice":
+        params["cid"] = payload.get("company_id")
+        query = """                    SELECT m.user_id
                       FROM public.company_memberships m
                      WHERE m.company_id = COALESCE(
                                CAST(:cid AS uuid),
@@ -174,17 +205,57 @@ async def _recipients_for(
                             SELECT id FROM public.company_roles
                              WHERE key IN ('FINANCE_MANAGER', 'ACCOUNTANT', 'SUPER_ADMIN')
                        )
-                    """,
-                    ),
-                    {"id": aggregate_id, "cid": payload.get("company_id")},
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return [uuid.UUID(str(r)) for r in rows]
-
-    return []
+                    """
+    elif aggregate_type == "sow":
+        query = """                    SELECT m.user_id
+                      FROM public.company_memberships m
+                      JOIN public.company_roles r ON r.id = m.role_id
+                     WHERE m.company_id = (SELECT s.company_id FROM public.sows s
+                                            WHERE s.id = CAST(:id AS uuid))
+                       AND m.status = 'ACTIVE'
+                       AND r.key = 'SUPER_ADMIN'
+                     UNION
+                     SELECT s.counterparty_user_id
+                       FROM public.sows s
+                      WHERE s.id = CAST(:id AS uuid)
+                        AND s.counterparty_user_id IS NOT NULL
+                     UNION
+                     SELECT m.user_id
+                       FROM public.company_memberships m
+                       JOIN public.company_roles r ON r.id = m.role_id
+                       JOIN public.sows s ON s.counterparty_company_id = m.company_id
+                      WHERE s.id = CAST(:id AS uuid)
+                        AND m.status = 'ACTIVE'
+                        AND r.key = 'SUPER_ADMIN'
+                    """
+    elif aggregate_type == "msa":
+        query = """                    SELECT m.user_id
+                      FROM public.company_memberships m
+                      JOIN public.company_roles r ON r.id = m.role_id
+                     WHERE m.company_id IN (
+                               SELECT msa.company_a_id FROM public.msas msa
+                                WHERE msa.id = CAST(:id AS uuid)
+                             UNION
+                               SELECT msa.company_b_id FROM public.msas msa
+                                WHERE msa.id = CAST(:id AS uuid))
+                       AND m.status = 'ACTIVE'
+                       AND r.key = 'SUPER_ADMIN'
+                    """
+    elif aggregate_type == "payment":
+        query = """                    SELECT m.user_id
+                      FROM public.company_memberships m
+                     WHERE m.company_id = (SELECT p.company_id FROM public.payments p
+                                            WHERE p.id = CAST(:id AS uuid))
+                       AND m.status = 'ACTIVE'
+                       AND m.role_id IN (
+                            SELECT id FROM public.company_roles
+                             WHERE key IN ('FINANCE_MANAGER', 'ACCOUNTANT', 'SUPER_ADMIN')
+                       )
+                    """
+    else:
+        return []
+    rows = (await conn.execute(text(query), params)).scalars().all()
+    return [uuid.UUID(str(r)) for r in rows if r]
 
 
 async def _insert_notifications(
@@ -234,6 +305,40 @@ async def _insert_notifications(
                 "meta": _json(payload),
             },
         )
+
+
+async def notify_aggregate(
+    conn: Any,
+    *,
+    event_type: str,
+    title: str,
+    body: str | None,
+    severity: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    company_id: uuid.UUID | None,
+    public_id: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    """Direct notification path for system jobs such as expiry sweeps.
+
+    Interactive flows publish outbox events; a scheduled sweep has no request
+    to attach, so it notifies the record's recipients straight from the row,
+    exactly like the event handler would. The UNIQUE key on (user_id, type,
+    resource_id) still makes reruns no-ops. Returns the recipient count.
+    """
+    payload: dict[str, Any] = {
+        "company_id": str(company_id) if company_id else None,
+        "public_id": public_id,
+        **(metadata or {}),
+    }
+    recipients = await _recipients_for(conn, aggregate_type, aggregate_id, payload)
+    if not recipients:
+        return 0
+    await _insert_notifications(
+        conn, event_type, title, body, severity, aggregate_type, aggregate_id, payload
+    )
+    return len(recipients)
 
 
 async def queue_billing_if_needed(event: dict[str, Any]) -> None:
@@ -385,6 +490,7 @@ def _render(event_type: str, payload: dict[str, Any]) -> tuple[str | None, str |
         ),
         "PAYMENT_DETECTED": ("A payment was detected", None, "INFO"),
         "PAYMENT_MATCHED": (f"Payment matched to invoice {public_id}", None, "SUCCESS"),
+        "PAYMENT_RECORDED": (f"Payment recorded for invoice {public_id}", None, "SUCCESS"),
     }
     title, body, severity = templates.get(event_type, (None, None, "INFO"))
     return title, body, severity

@@ -113,7 +113,7 @@ def _cursor(raw: str | None) -> dict[str, str]:
 async def list_projects(
     ctx_and_conn: ProjectsRead,
     q: str | None = Query(None, max_length=200, description="Free-text search"),
-    status_filter: str | None = Query(None, alias="status", max_length=32),
+    status_filter: str | None = Query(None, alias="status", max_length=128),
     client_company_id: str | None = Query(None, max_length=32),
     owner_user_id: str | None = Query(None, max_length=32),
     limit: int = Query(25, ge=1, le=100),
@@ -283,7 +283,7 @@ async def archive_project(
 async def list_project_roles(
     ctx_and_conn: RolesRead,
     project_id: str | None = Query(None, max_length=32),
-    status_filter: str | None = Query(None, alias="status", max_length=32),
+    status_filter: str | None = Query(None, alias="status", max_length=128),
     q: str | None = Query(None, max_length=200),
     limit: int = Query(50, ge=1, le=200),
     cursor: str | None = Query(None),
@@ -398,7 +398,7 @@ async def deactivate_project_role(
 async def list_sows(
     ctx_and_conn: SowsRead,
     project_id: str | None = Query(None, max_length=32),
-    status_filter: str | None = Query(None, alias="status", max_length=32),
+    status_filter: str | None = Query(None, alias="status", max_length=128),
     q: str | None = Query(None, max_length=200),
     limit: int = Query(25, ge=1, le=100),
     cursor: str | None = Query(None),
@@ -498,6 +498,77 @@ async def approve_sow(
     )
 
 
+@router.post("/sows/{sow_id}/send", response_model=SowResponse, summary="Send a SOW")
+async def send_sow(
+    ctx_and_conn: SowsApprove, sow_id: str, payload: SowActionRequest | None = None
+) -> dict[str, Any]:
+    """Transmit a DRAFT SOW to its counterparty for acceptance."""
+    ctx, conn = ctx_and_conn
+    return await code_service.send_sow(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=sow_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        reason=payload.reason if payload else None,
+    )
+
+
+@router.post(
+    "/sows/{sow_id}/acknowledge",
+    response_model=SowResponse,
+    summary="Acknowledge a received SOW",
+)
+async def acknowledge_sow(ctx_and_conn: SowsApprove, sow_id: str) -> dict[str, Any]:
+    """Record that the counterparty has the SOW under review."""
+    ctx, conn = ctx_and_conn
+    return await code_service.acknowledge_sow(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=sow_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.post("/sows/{sow_id}/accept", response_model=SowResponse, summary="Accept a SOW")
+async def accept_sow(
+    ctx_and_conn: SowsApprove, sow_id: str, payload: SowActionRequest | None = None
+) -> dict[str, Any]:
+    """Counterparty acceptance: activates the SOW and generates its contracts."""
+    ctx, conn = ctx_and_conn
+    return await code_service.respond_to_sow(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=sow_id,
+        accept=True,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        notes=payload.reason if payload else None,
+    )
+
+
+@router.post("/sows/{sow_id}/decline", response_model=SowResponse, summary="Decline a SOW")
+async def decline_sow(
+    ctx_and_conn: SowsApprove, sow_id: str, payload: SowActionRequest | None = None
+) -> dict[str, Any]:
+    """Counterparty rejection with the reason recorded; the SOW survives."""
+    ctx, conn = ctx_and_conn
+    return await code_service.respond_to_sow(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=sow_id,
+        accept=False,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        notes=payload.reason if payload else None,
+    )
+
+
 @router.post("/sows/{sow_id}/reject", response_model=SowResponse, summary="Return a SOW to draft")
 async def reject_sow(
     ctx_and_conn: SowsApprove, sow_id: str, payload: SowActionRequest
@@ -512,6 +583,20 @@ async def reject_sow(
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
         reason=payload.reason,
+    )
+
+
+@router.post("/sows/{sow_id}/reopen", response_model=SowResponse, summary="Reopen a declined SOW")
+async def reopen_sow(ctx_and_conn: SowsApprove, sow_id: str) -> dict[str, Any]:
+    """Return a REJECTED SOW to DRAFT so it can be revised and sent again."""
+    ctx, conn = ctx_and_conn
+    return await code_service.reopen_sow(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=sow_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
     )
 
 
@@ -565,7 +650,7 @@ async def list_contracts(
     ctx_and_conn: ContractsRead,
     project_id: str | None = Query(None, max_length=32),
     sow_id: str | None = Query(None, max_length=32),
-    status_filter: str | None = Query(None, alias="status", max_length=32),
+    status_filter: str | None = Query(None, alias="status", max_length=128),
     q: str | None = Query(None, max_length=200),
     expiring_within_days: int | None = Query(None, ge=1, le=365),
     limit: int = Query(25, ge=1, le=100),
@@ -795,6 +880,7 @@ async def terminate_contract(
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
         reason=payload.reason or payload.notes or "Terminated by owner",
+        effective_date=payload.effective_date,
     )
 
 

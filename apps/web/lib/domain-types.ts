@@ -29,6 +29,7 @@ export const PROJECT_STATUSES = [
   'ON_HOLD',
   'COMPLETED',
   'CANCELLED',
+  'CLOSED',
 ] as const
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number]
 
@@ -73,6 +74,7 @@ export interface Project {
   contract_count: number
   active_contract_count: number
   timesheet_count: number
+  allowed_transitions?: string[]
   last_activity_at: string | null
   metadata: Record<string, unknown>
   created_at: string
@@ -159,7 +161,10 @@ export interface ProjectBilling {
 export const SOW_STATUSES = [
   'DRAFT',
   'PENDING_APPROVAL',
+  'SENT',
+  'PENDING_ACCEPTANCE',
   'ACTIVE',
+  'REJECTED',
   'EXPIRED',
   'TERMINATED',
   'CLOSED',

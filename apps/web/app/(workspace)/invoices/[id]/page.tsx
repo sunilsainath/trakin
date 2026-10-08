@@ -10,6 +10,7 @@ import {
   FileWarning,
   History,
   ListChecks,
+  Printer,
   Send,
   ShieldAlert,
   Undo2,
@@ -38,7 +39,7 @@ import { DataTable, type Column } from '@/components/data-table'
 import { PublicId } from '@/components/public-id'
 import { DecisionDialog, DialogField, ReasonDialog } from '@/components/destructive'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingBlock, errorMessage, useCompanyQuery } from '@/components/query'
+import { ErrorState, LoadingBlock, PermissionState, errorMessage, isPermissionError, useCompanyQuery } from '@/components/query'
 import { notifyError, notifySuccess } from '@/components/toast'
 import { RecordPaymentDialog } from '../record-payment'
 
@@ -118,7 +119,11 @@ export default function InvoiceDetailPage() {
     return (
       <PageShell>
         <div className="space-y-4">
-          <ErrorState error={invoice.error} onRetry={() => void invoice.refetch()} />
+          {isPermissionError(invoice.error) ? (
+            <PermissionState error={invoice.error} />
+          ) : (
+            <ErrorState error={invoice.error} onRetry={() => void invoice.refetch()} />
+          )}
           <Link href="/invoices" className="text-sm font-medium text-primary hover:underline">
             Back to invoices
           </Link>
@@ -156,6 +161,16 @@ export default function InvoiceDetailPage() {
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <PublicId value={data.public_id} kind="invoice" size="lg" />
+
+              <Button
+                size="sm"
+                variant="outline"
+                className="print:hidden"
+                onClick={() => window.print()}
+              >
+                <Printer aria-hidden />
+                Print / PDF
+              </Button>
 
               {Number(data.balance_due) > 0 && can('payments.create') ? (
                 <RecordPaymentDialog invoice={data} />

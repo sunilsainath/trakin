@@ -2173,3 +2173,1312 @@ async def test_company_creation_rejects_an_already_claimed_w9(conn, tenants) -> 
     await _found_company(conn, tenants, "admin", w9)
     with pytest.raises(ResourceNotFoundError):
         await _found_company(conn, tenants, "admin", w9)
+
+
+# =============================================================================
+# project lifecycle (§10)
+# =============================================================================
+async def _draft_project(conn, tenants, **overrides: Any) -> dict[str, Any]:
+    """A DRAFT project built through the real service."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    payload: dict[str, Any] = {"name": "Phase Project"}
+    payload.update(overrides)
+    return await code.create_project(
+        conn,
+        company_id=tenant.company_id,
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        payload=payload,
+    )
+
+
+async def _move_project(conn, tenants, public_id: str, target: str) -> dict[str, Any]:
+    from app.services import code
+
+    tenant = tenants["admin"]
+    return await code.update_project(
+        conn,
+        company_id=tenant.company_id,
+        public_id=public_id,
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        changes={"status": target},
+    )
+
+
+async def test_project_starts_draft_and_advertises_transitions(conn, tenants) -> None:
+    """Projects are born DRAFT with their legal moves attached."""
+    project = await _draft_project(conn, tenants)
+    assert project["status"] == "DRAFT"
+    assert project["allowed_transitions"] == ["PLANNING", "ACTIVE", "CANCELLED", "CLOSED"]
+    with pytest.raises(ValidationError):
+        await _draft_project(conn, tenants, status="ACTIVE")
+
+
+async def test_project_status_transitions_are_enforced(conn, tenants) -> None:
+    """DRAFT -> ACTIVE is legal; ACTIVE -> DRAFT is not a transition."""
+    project = await _draft_project(conn, tenants)
+    moved = await _move_project(conn, tenants, project["public_id"], "ACTIVE")
+    assert moved["status"] == "ACTIVE"
+    with pytest.raises(InvalidStateTransitionError):
+        await _move_project(conn, tenants, project["public_id"], "DRAFT")
+
+
+async def test_terminal_project_is_read_only(conn, tenants) -> None:
+    """CANCELLED projects refuse every edit, including status moves."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    project = await _draft_project(conn, tenants)
+    await _move_project(conn, tenants, project["public_id"], "CANCELLED")
+    with pytest.raises(BusinessRuleViolationError):
+        await code.update_project(
+            conn,
+            company_id=tenant.company_id,
+            public_id=project["public_id"],
+            actor_user_id=tenant.user_id,
+            request_id="flow",
+            ip_address=None,
+            changes={"name": "Sneaky rename"},
+        )
+    with pytest.raises(BusinessRuleViolationError):
+        await _move_project(conn, tenants, project["public_id"], "ACTIVE")
+
+
+async def test_individual_project_forces_creator_as_owner(conn, tenants) -> None:
+    """An INDIVIDUAL project belongs to its creator; owner ids are not accepted."""
+    admin, worker = tenants["admin"], tenants["worker"]
+    project = await _draft_project(
+        conn,
+        tenants,
+        category="INDIVIDUAL",
+        owner_user_id=worker.user_public_id,
+    )
+    assert project["category"] == "INDIVIDUAL"
+    assert project["owner_user_id"] == admin.user_public_id
+
+
+# =============================================================================
+# sow external acceptance (§14-15)
+# =============================================================================
+async def _external_sow(conn, skeleton, tenants, **overrides: Any) -> dict[str, Any]:
+    """A DRAFT SOW addressed to the worker company, via the real service."""
+    payload: dict[str, Any] = {
+        "title": "External SOW",
+        "counterparty_company_id": tenants["worker"].company_public_id,
+        "roles": [
+            {
+                "project_role_id": await _public(conn, "project_roles", skeleton.project_role),
+                "quantity": 1,
+                "rate": "80.0000",
+                "rate_type": "HOURLY",
+                "currency": "USD",
+            }
+        ],
+    }
+    payload.update(overrides)
+    return await _draft_sow_with_role(conn, skeleton, tenants, payload)
+
+
+async def test_sow_send_acknowledge_accept_flow(conn, skeleton, tenants) -> None:
+    """DRAFT -> SENT -> PENDING_ACCEPTANCE -> ACTIVE, with a contract generated."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    sow = await _external_sow(conn, skeleton, tenants)
+
+    sent = await code.send_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    assert sent["status"] == "SENT"
+
+    acked = await code.acknowledge_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    assert acked["status"] == "PENDING_ACCEPTANCE"
+
+    accepted = await code.respond_to_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        accept=True,
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        notes="Looks good.",
+    )
+    assert accepted["status"] == "ACTIVE"
+    assert accepted["contract_count"] == 1
+
+
+async def test_sow_decline_records_reason_and_survives(conn, skeleton, tenants) -> None:
+    """A declined SOW keeps its history and can be revised and resent."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    sow = await _external_sow(conn, skeleton, tenants)
+    await code.send_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    declined = await code.respond_to_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        accept=False,
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        notes="Rate too high.",
+    )
+    assert declined["status"] == "REJECTED"
+    assert declined["contract_count"] == 0
+
+    history = await code.get_sow(
+        conn, company_id=tenant.company_id, public_id=sow["public_id"], with_history=True
+    )
+    rejects = [h for h in history["history"] if h["action"] == "sow.rejected"]
+    assert len(rejects) == 1
+    assert rejects[0]["reason"] == "Rate too high."
+
+    redraft = await code.reopen_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    assert redraft["status"] == "DRAFT"
+    resent = await code.send_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    assert resent["status"] == "SENT"
+
+
+async def test_sow_send_requires_roles(conn, skeleton, tenants) -> None:
+    """A role-less SOW cannot be sent: the counterparty would have nothing to accept.
+
+    (A counterparty-less SOW cannot exist at all — the schema CHECK rejects
+    it at insert — so send_sow's counterparty guard is defence in depth for a
+    state the API cannot produce.)
+    """
+    from app.services import code
+
+    tenant = tenants["admin"]
+    roleless = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {
+            "title": "Roleless SOW",
+            "counterparty_company_id": tenants["worker"].company_public_id,
+            "roles": [],
+        },
+    )
+    with pytest.raises(BusinessRuleViolationError):
+        await code.send_sow(
+            conn,
+            company_id=tenant.company_id,
+            public_id=roleless["public_id"],
+            actor_user_id=tenant.user_id,
+            request_id="flow",
+            ip_address=None,
+        )
+
+
+async def test_sow_accept_from_draft_is_rejected(conn, skeleton, tenants) -> None:
+    """Acceptance is only legal once the SOW is under review."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    sow = await _external_sow(conn, skeleton, tenants)
+    with pytest.raises(InvalidStateTransitionError):
+        await code.respond_to_sow(
+            conn,
+            company_id=tenant.company_id,
+            public_id=sow["public_id"],
+            accept=True,
+            actor_user_id=tenant.user_id,
+            request_id="flow",
+            ip_address=None,
+        )
+
+
+# =============================================================================
+# contract expiry sweep (§30)
+# =============================================================================
+async def _active_contract_ending(
+    conn, skeleton, tenants, *, days_offset: int, title: str = "Expiry Probe"
+) -> dict[str, Any]:
+    """An ACTIVE contract ending a given number of days from today.
+
+    Built through SOW approval (so generation is exercised), then dated with
+    an UPDATE the way the sweep expects to find real rows.
+    """
+    from datetime import timedelta
+
+    from app.core.clock import utc_today
+
+    tenant = tenants["admin"]
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {"title": title, "counterparty_company_id": tenants["worker"].company_public_id},
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+    assert active["contract_count"] == 1
+    today = utc_today()
+    await conn.execute(
+        text(
+            "UPDATE public.contracts SET status = 'ACTIVE',"
+            " start_date = CAST(:start AS date), end_date = CAST(:end AS date)"
+            " WHERE public_id = :pid"
+        ),
+        {
+            "start": today - timedelta(days=60),
+            "end": today + timedelta(days=days_offset),
+            "pid": active["contract_ids"][0],
+        },
+    )
+    # Expiry warnings notify the people on the contract: give the worker an
+    # ACTIVE assignment so the sweep has a recipient, the way real contracts do.
+    await conn.execute(
+        text(
+            """
+            INSERT INTO public.assignments
+              (contract_id, project_id, company_id, user_id, role_title, currency,
+               start_date, status, allocation_pct, source)
+            VALUES ((SELECT id FROM public.contracts WHERE public_id = :pid),
+                    CAST(:project AS uuid), CAST(:company AS uuid), CAST(:user AS uuid),
+                    'Expiry Probe', 'USD', CAST(:start AS date), 'ACTIVE', 100, 'MANUAL')
+            """
+        ),
+        {
+            "pid": active["contract_ids"][0],
+            "project": skeleton.project,
+            "company": tenants["admin"].company_id,
+            "user": tenants["worker"].user_id,
+            "start": today - timedelta(days=60),
+        },
+    )
+    return {"public_id": active["contract_ids"][0], "tenant": tenant}
+
+
+async def _contract_notifications(conn, contract_public_id: str, like: str) -> list[str]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                SELECT n.type FROM platform.notifications n
+                  JOIN public.contracts c ON c.id = n.resource_id
+                 WHERE c.public_id = :pid AND n.type LIKE :like
+                 ORDER BY n.created_at
+                """
+                ),
+                {"pid": contract_public_id, "like": like},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [str(t) for t in rows]
+
+
+async def test_expiry_sweep_flips_past_due_and_audits(conn, skeleton, tenants) -> None:
+    """Yesterday-ended contracts become EXPIRED with an audit row and a notice."""
+    from app.services import contracts
+
+    made = await _active_contract_ending(conn, skeleton, tenants, days_offset=-1)
+    result = await contracts.run_contract_expiry_sweep(conn)
+    assert result["expired"] >= 1
+
+    status = (
+        await conn.execute(
+            text("SELECT status FROM public.contracts WHERE public_id = :pid"),
+            {"pid": made["public_id"]},
+        )
+    ).scalar_one()
+    assert status == "EXPIRED"
+
+    actions = (
+        (
+            await conn.execute(
+                text("SELECT action FROM platform.audit_logs WHERE resource_public_id = :pid"),
+                {"pid": made["public_id"]},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert "contract.expired" in set(actions)
+    assert await _contract_notifications(conn, made["public_id"], "CONTRACT_EXPIRED") == [
+        "CONTRACT_EXPIRED"
+    ]
+
+
+async def test_expiry_sweep_warns_once_per_tier(conn, skeleton, tenants) -> None:
+    """A 5-day contract warns at the 7-day tier exactly once, however often run."""
+    from app.services import contracts
+
+    made = await _active_contract_ending(conn, skeleton, tenants, days_offset=5)
+    first = await contracts.run_contract_expiry_sweep(conn)
+    assert first["notified"] >= 1
+    assert await _contract_notifications(conn, made["public_id"], "CONTRACT_EXPIRING%") == [
+        "CONTRACT_EXPIRING_7D"
+    ]
+
+    second = await contracts.run_contract_expiry_sweep(conn)
+    assert second["expired"] == 0
+    assert await _contract_notifications(conn, made["public_id"], "CONTRACT_EXPIRING%") == [
+        "CONTRACT_EXPIRING_7D"
+    ]
+
+    status = (
+        await conn.execute(
+            text("SELECT status FROM public.contracts WHERE public_id = :pid"),
+            {"pid": made["public_id"]},
+        )
+    ).scalar_one()
+    assert status == "ACTIVE"
+
+
+async def test_renewal_restarts_warning_cycle(conn, skeleton, tenants) -> None:
+    """Renewing clears old tier warnings so the new period warns again."""
+    from datetime import timedelta
+
+    from app.core.clock import utc_today
+    from app.services import contracts
+
+    tenant = tenants["admin"]
+    made = await _active_contract_ending(conn, skeleton, tenants, days_offset=5)
+    await contracts.run_contract_expiry_sweep(conn)
+    assert await _contract_notifications(conn, made["public_id"], "CONTRACT_EXPIRING%") == [
+        "CONTRACT_EXPIRING_7D"
+    ]
+
+    today = utc_today()
+    await contracts.renew_contract(
+        conn,
+        company_id=tenant.company_id,
+        public_id=made["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        new_start_date=today,
+        new_end_date=today + timedelta(days=400),
+        contract_value=None,
+    )
+    assert await _contract_notifications(conn, made["public_id"], "CONTRACT_EXPIRING%") == []
+
+    await conn.execute(
+        text("UPDATE public.contracts SET end_date = CAST(:end AS date) WHERE public_id = :pid"),
+        {"end": today + timedelta(days=5), "pid": made["public_id"]},
+    )
+    await contracts.run_contract_expiry_sweep(conn)
+    assert await _contract_notifications(conn, made["public_id"], "CONTRACT_EXPIRING%") == [
+        "CONTRACT_EXPIRING_7D"
+    ]
+
+
+# =============================================================================
+# requires_timesheets gate (§36)
+# =============================================================================
+async def test_invoice_requires_timesheets_when_contract_demands(conn, skeleton, tenants) -> None:
+    """A timesheet-gated contract cannot bill on fixed lines alone."""
+    from app.services import invoicing
+
+    tenant = tenants["admin"]
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {"counterparty_company_id": tenants["worker"].company_public_id},
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+    contract_pid = active["contract_ids"][0]
+    await conn.execute(
+        text("UPDATE public.contracts SET status = 'ACTIVE' WHERE public_id = :pid"),
+        {"pid": contract_pid},
+    )
+    contract_id = (
+        await conn.execute(
+            text("SELECT id::text FROM public.contracts WHERE public_id = :pid"),
+            {"pid": contract_pid},
+        )
+    ).scalar_one()
+    await conn.execute(
+        text(
+            """
+            INSERT INTO public.contract_line_items
+              (contract_id, line_type, label, description, quantity, unit,
+               unit_rate, currency, billing_basis, billing_frequency)
+            VALUES (CAST(:cid AS uuid), 'FIXED', 'Monthly platform fee',
+                    'Fixed platform fee', 1, 'LOT', 500, 'USD', 'FIXED', 'MONTHLY')
+            """
+        ),
+        {"cid": contract_id},
+    )
+
+    async def _generate() -> dict[str, Any]:
+        return await invoicing.generate_invoice(
+            conn,
+            company_id=tenant.company_id,
+            actor_user_id=tenant.user_id,
+            request_id="flow",
+            ip_address=None,
+            contract_public_id=contract_pid,
+            period_start=PERIOD_START,
+            period_end=PERIOD_END,
+        )
+
+    with pytest.raises(BusinessRuleViolationError) as caught:
+        await _generate()
+    assert caught.value.details["reason"] == "TIMESHEETS_REQUIRED"
+
+    await conn.execute(
+        text("UPDATE public.contracts SET requires_timesheets = false WHERE public_id = :pid"),
+        {"pid": contract_pid},
+    )
+    invoice = await _generate()
+    assert invoice["status"] == "DRAFT"
+    assert {i["line_type"] for i in invoice["items"]} == {"FIXED"}
+
+
+# =============================================================================
+# invoice approval segregation of duties (§42)
+# =============================================================================
+async def test_invoice_self_approval_is_refused_and_decider_recorded(
+    conn, skeleton, tenants
+) -> None:
+    """The generator cannot approve their own invoice; the decider is recorded."""
+    from app.services import invoicing
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    invoice = await _draft_invoice(conn, skeleton, admin, worker.company_id)
+    await _line(conn, skeleton, invoice, quantity=Decimal("10"), rate=Decimal("100"))
+    await invoicing.submit_for_approval(
+        conn,
+        company_id=admin.company_id,
+        public_id=invoice["public_id"],
+        actor_user_id=admin.user_id,
+        request_id="flow",
+        ip_address=None,
+        notes=None,
+    )
+
+    with pytest.raises(BusinessRuleViolationError) as caught:
+        await invoicing.decide_approval(
+            conn,
+            company_id=admin.company_id,
+            public_id=invoice["public_id"],
+            step_no=1,
+            decision="APPROVED",
+            actor_user_id=admin.user_id,
+            request_id="flow",
+            ip_address=None,
+            notes=None,
+        )
+    assert caught.value.details["reason"] == "SEGREGATION_OF_DUTIES"
+
+    decided = await invoicing.decide_approval(
+        conn,
+        company_id=admin.company_id,
+        public_id=invoice["public_id"],
+        step_no=1,
+        decision="APPROVED",
+        actor_user_id=worker.user_id,
+        request_id="flow",
+        ip_address=None,
+        notes="Checked against the SOW.",
+    )
+    assert decided["status"] == "APPROVED"
+    assert decided["approvals"][0]["approver_public_id"] == worker.user_public_id
+
+
+# =============================================================================
+# event emission (§50)
+# =============================================================================
+async def _outbox_events(conn, aggregate_id: str) -> list[dict[str, Any]]:
+    """Outbox rows for one aggregate, oldest first."""
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT event_type, payload FROM platform.outbox_events
+                     WHERE aggregate_id = CAST(:aid AS uuid)
+                     ORDER BY created_at
+                    """
+                ),
+                {"aid": aggregate_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def test_sow_send_emits_outbox_event(conn, skeleton, tenants) -> None:
+    """Sending a SOW publishes its status change for the workers."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    sow = await _external_sow(conn, skeleton, tenants)
+    await code.send_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    events = await _outbox_events(conn, str(sow["id"]))
+    sent = [e for e in events if e["event_type"] == "SOW_STATUS_CHANGED"]
+    assert sent
+    assert sent[-1]["payload"]["new"] == "SENT"
+    assert sent[-1]["payload"]["public_id"] == sow["public_id"]
+
+
+async def test_contract_send_and_accept_emit_outbox_events(conn, skeleton, tenants) -> None:
+    """The counterparty handshake is observable without polling tables."""
+    from app.services import contracts
+
+    tenant = tenants["admin"]
+    offered = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {
+            "title": "Handshake SOW",
+            "counterparty_company_id": tenants["worker"].company_public_id,
+        },
+    )
+    draft = await contracts.create_contract(
+        conn,
+        company_id=tenant.company_id,
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        payload={
+            "project_id": offered["project_id"],
+            "sow_id": offered["public_id"],
+            "title": "Handshake contract",
+            "roles": [
+                {
+                    "project_role_id": await _public(conn, "project_roles", skeleton.project_role),
+                    "quantity": 1,
+                    "rate": "80.0000",
+                    "rate_type": "HOURLY",
+                    "currency": "USD",
+                }
+            ],
+        },
+    )
+    await contracts.send_contract(
+        conn,
+        company_id=tenant.company_id,
+        public_id=draft["public_id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        notes=None,
+    )
+    decided = await contracts.respond_to_contract(
+        conn,
+        company_id=tenant.company_id,
+        public_id=draft["public_id"],
+        accept=True,
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        notes="Accepted.",
+    )
+    assert decided["status"] == "ACCEPTED"
+
+    events = await _outbox_events(conn, str(draft["id"]))
+    kinds = [(e["event_type"], e["payload"].get("new")) for e in events]
+    assert ("CONTRACT_STATUS_CHANGED", "SENT") in kinds
+    assert ("CONTRACT_STATUS_CHANGED", "ACCEPTED") in kinds
+
+
+async def test_invoice_submit_emits_outbox_event(conn, skeleton, tenants) -> None:
+    """Submitting an invoice for approval publishes its status change."""
+    from app.services import invoicing
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    invoice = await _draft_invoice(conn, skeleton, admin, worker.company_id)
+    await _line(conn, skeleton, invoice, quantity=Decimal("10"), rate=Decimal("100"))
+    await invoicing.submit_for_approval(
+        conn,
+        company_id=admin.company_id,
+        public_id=invoice["public_id"],
+        actor_user_id=admin.user_id,
+        request_id="flow",
+        ip_address=None,
+        notes=None,
+    )
+    events = await _outbox_events(conn, str(invoice["id"]))
+    submitted = [e for e in events if e["event_type"] == "INVOICE_STATUS_CHANGED"]
+    assert submitted
+    assert submitted[-1]["payload"]["new"] == "PENDING"
+
+
+async def test_sow_event_recipients_cover_both_sides(conn, skeleton, tenants) -> None:
+    """Owner admins and the counterparty side are all notified, nobody else."""
+    from app.services import events as event_service
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    sow = await _external_sow(conn, skeleton, tenants)
+    recipients = await event_service._recipients_for(
+        conn, "sow", str(sow["id"]), {"company_id": str(admin.company_id)}
+    )
+    assert admin.user_id in recipients
+    assert worker.user_id in recipients
+
+
+async def test_payment_event_recipients_cover_finance(conn, skeleton, tenants) -> None:
+    """Payment events reach the owner company's finance roles."""
+    from app.services import events as event_service
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    payment = await _completed_payment(conn, admin, amount=Decimal("100.00"))
+    recipients = await event_service._recipients_for(
+        conn, "payment", str(payment["id"]), {"company_id": str(admin.company_id)}
+    )
+    assert worker.user_id in recipients
+
+
+# =============================================================================
+# multi-hop isolation (§64)
+# =============================================================================
+async def _provision_user(conn, auth_id: str, tag: str) -> uuid.UUID:
+    from app.core.security import provision_user
+
+    return uuid.UUID(
+        await provision_user(
+            conn,
+            auth_id,
+            email=f"{tag}_{uuid.uuid4().hex[:6]}@example.test",
+            first_name=tag.title(),
+            verified=True,
+        )
+    )
+
+
+async def _user_public_id(conn, user_id: uuid.UUID) -> str:
+    return str(
+        (
+            await conn.execute(
+                text("SELECT public_id FROM public.users WHERE id = :uid"), {"uid": user_id}
+            )
+        ).scalar_one()
+    )
+
+
+async def _provision_company(conn, tag: str) -> dict[str, Any]:
+    """A fresh user + company + SUPER_ADMIN membership, in this transaction."""
+    user_id = await _provision_user(conn, str(uuid.uuid4()), tag)
+    company = await _one(
+        conn,
+        "INSERT INTO public.companies (legal_name, display_name, created_by)"
+        " VALUES (:legal, :display, :by) RETURNING id::text, public_id",
+        {"legal": f"{tag} Legal", "display": tag.title(), "by": user_id},
+    )
+    await conn.execute(
+        text("SELECT app.bootstrap_company_roles( CAST(:company AS uuid), CAST(:founder AS uuid))"),
+        {"company": company["id"], "founder": user_id},
+    )
+    return {
+        "user_id": user_id,
+        "user_public_id": await _user_public_id(conn, user_id),
+        "company_id": uuid.UUID(company["id"]),
+        "company_public_id": str(company["public_id"]),
+    }
+
+
+async def _hop_sow(
+    conn, owner: dict[str, Any], project_pid: str, counterparty: dict[str, str], rate: str
+) -> dict[str, Any]:
+    """Project role + SOW + approval, returning the live SOW (contract made)."""
+    from app.services import code
+
+    role = await code.create_project_role(
+        conn,
+        company_id=owner["company_id"],
+        project_public_id=project_pid,
+        actor_user_id=owner["user_id"],
+        request_id="flow",
+        ip_address=None,
+        payload={"title": "Hop Developer", "required_count": 10},
+    )
+    sow = await code.create_sow(
+        conn,
+        company_id=owner["company_id"],
+        project_public_id=project_pid,
+        actor_user_id=owner["user_id"],
+        request_id="flow",
+        ip_address=None,
+        payload={
+            "title": "Hop SOW",
+            "counterparty_company_id": counterparty.get("company_public_id"),
+            "counterparty_user_id": counterparty.get("user_public_id"),
+            "sow_type": "INDIVIDUAL" if counterparty.get("user_public_id") else "COMPANY",
+            "roles": [
+                {
+                    "project_role_id": role["public_id"],
+                    "quantity": 2,
+                    "rate": rate,
+                    "rate_type": "HOURLY",
+                    "currency": "USD",
+                }
+            ],
+        },
+    )
+    for target in ("PENDING_APPROVAL", "ACTIVE"):
+        await code.transition_sow(
+            conn,
+            company_id=owner["company_id"],
+            public_id=sow["public_id"],
+            target=target,
+            actor_user_id=owner["user_id"],
+            request_id="flow",
+            ip_address=None,
+        )
+    live = await code.get_sow(conn, company_id=owner["company_id"], public_id=sow["public_id"])
+    assert live["contract_count"] == 1
+    return live
+
+
+async def test_multihop_chain_isolates_downstream_data(conn, skeleton, tenants) -> None:
+    """A -> B -> D -> employee: separate contracts, invisible across hops."""
+    _ = skeleton
+    from app.db.session import set_identity
+    from app.services import code
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    founder_d = await _provision_company(conn, "hopco")
+    employee_id = await _provision_user(conn, str(uuid.uuid4()), "hopworker")
+    employee_pid = await _user_public_id(conn, employee_id)
+
+    async def _as(user_id: uuid.UUID, company_id: uuid.UUID) -> None:
+        await set_identity(conn, user_id=user_id, company_id=company_id, request_id="flow")
+
+    async def _project(owner: dict[str, Any], name: str) -> str:
+        created = await code.create_project(
+            conn,
+            company_id=owner["company_id"],
+            actor_user_id=owner["user_id"],
+            request_id="flow",
+            ip_address=None,
+            payload={"name": name},
+        )
+        return str(created["public_id"])
+
+    # Hop 1, as A: project + SOW to B at $60, approved, contract generated.
+    await _as(admin.user_id, admin.company_id)
+    hop_ab = await _hop_sow(
+        conn,
+        {"user_id": admin.user_id, "company_id": admin.company_id},
+        await _project({"user_id": admin.user_id, "company_id": admin.company_id}, "Hop Project A"),
+        {"company_public_id": worker.company_public_id},
+        "60.0000",
+    )
+
+    # Hop 2, as B: own project + SOW to D at $50, approved.
+    await _as(worker.user_id, worker.company_id)
+    hop_bd = await _hop_sow(
+        conn,
+        {"user_id": worker.user_id, "company_id": worker.company_id},
+        await _project(
+            {"user_id": worker.user_id, "company_id": worker.company_id}, "Hop Project B"
+        ),
+        {"company_public_id": founder_d["company_public_id"]},
+        "50.0000",
+    )
+
+    # Hop 3, as D: individual SOW to the employee at $40, approved.
+    await _as(founder_d["user_id"], founder_d["company_id"])
+    hop_individual = await _hop_sow(
+        conn,
+        founder_d,
+        await _project(founder_d, "Hop Project D"),
+        {"user_public_id": employee_pid},
+        "40.0000",
+    )
+
+    # A sees its own hop and nothing downstream of it.
+    await _as(admin.user_id, admin.company_id)
+    assert (await code.get_sow(conn, company_id=admin.company_id, public_id=hop_ab["public_id"]))[
+        "contract_count"
+    ] == 1
+    with pytest.raises(ResourceNotFoundError):
+        await code.get_sow(conn, company_id=admin.company_id, public_id=hop_bd["public_id"])
+    with pytest.raises(ResourceNotFoundError):
+        await code.get_sow(conn, company_id=admin.company_id, public_id=hop_individual["public_id"])
+
+    # B sees both its hops but not D's engagement with the individual.
+    await _as(worker.user_id, worker.company_id)
+    assert (await code.get_sow(conn, company_id=worker.company_id, public_id=hop_bd["public_id"]))[
+        "contract_count"
+    ] == 1
+    with pytest.raises(ResourceNotFoundError):
+        await code.get_sow(
+            conn, company_id=worker.company_id, public_id=hop_individual["public_id"]
+        )
+
+    # D sees its own hops but nothing upstream.
+    await _as(founder_d["user_id"], founder_d["company_id"])
+    assert (
+        await code.get_sow(
+            conn, company_id=founder_d["company_id"], public_id=hop_individual["public_id"]
+        )
+    )["contract_count"] == 1
+    with pytest.raises(ResourceNotFoundError):
+        await code.get_sow(conn, company_id=founder_d["company_id"], public_id=hop_ab["public_id"])
+
+
+# =============================================================================
+# allocation race (§62)
+# =============================================================================
+
+
+async def test_concurrent_allocations_allow_only_one(conn, skeleton, tenants) -> None:
+    """Two simultaneous approvals of the last slot: exactly one survives.
+
+
+
+    The status trigger recomputes under an advisory lock, so the second
+
+    approval observes the first one's committed row and aborts with a capacity
+
+    violation. Everything here runs as raw SQL (no audit rows), so the
+
+    committed winner row is deleted below and the shared database is left
+
+    exactly as found.
+
+    """
+
+    import asyncio
+
+    from sqlalchemy.exc import DBAPIError
+
+    from app.db.session import get_connection_factory, set_identity
+
+    _ = skeleton
+
+    admin = tenants["admin"]
+
+    factory = get_connection_factory()
+
+    marker = uuid.uuid4().hex[:8]
+
+    async def _open() -> tuple[Any, Any, Any]:
+
+        manager = factory()
+
+        connection = await manager.__aenter__()
+
+        tx = await connection.begin()
+
+        await set_identity(
+            connection,
+            user_id=admin.user_id,
+            company_id=admin.company_id,
+            request_id="pytest-race",
+        )
+
+        return manager, connection, tx
+
+    holder, setup, setup_tx = await _open()
+
+    try:
+        project = (
+            (
+                await setup.execute(
+                    text(
+                        "INSERT INTO public.projects (company_id, name, status)"
+                        " VALUES (CAST(:c AS uuid), :name, 'DRAFT')"
+                        " RETURNING id::text, public_id"
+                    ),
+                    {"c": admin.company_id, "name": f"Race {marker}"},
+                )
+            )
+            .mappings()
+            .first()
+        )
+
+        assert project is not None
+
+        role = (
+            (
+                await setup.execute(
+                    text(
+                        "INSERT INTO public.project_roles"
+                        " (project_id, company_id, title, required_count, status)"
+                        " VALUES (CAST(:p AS uuid), CAST(:c AS uuid), 'Last Slot', 1, 'OPEN')"
+                        " RETURNING id::text, public_id"
+                    ),
+                    {"p": project["id"], "c": admin.company_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+
+        assert role is not None
+
+        sows = []
+
+        for label in ("Race SOW A", "Race SOW B"):
+            created = (
+                (
+                    await setup.execute(
+                        text(
+                            "INSERT INTO public.sows"
+                            " (project_id, company_id, sow_type, counterparty_company_id,"
+                            "  title, status)"
+                            " VALUES (CAST(:p AS uuid), CAST(:c AS uuid), 'COMPANY',"
+                            "         CAST(:cp AS uuid), :title, 'DRAFT')"
+                            " RETURNING id::text, public_id"
+                        ),
+                        {
+                            "p": project["id"],
+                            "c": admin.company_id,
+                            "cp": tenants["worker"].company_id,
+                            "title": f"{label} {marker}",
+                        },
+                    )
+                )
+                .mappings()
+                .first()
+            )
+
+            assert created is not None
+
+            await setup.execute(
+                text(
+                    "INSERT INTO public.sow_roles (sow_id, project_role_id, quantity)"
+                    " VALUES (CAST(:s AS uuid), CAST(:r AS uuid), 1)"
+                ),
+                {"s": created["id"], "r": role["id"]},
+            )
+
+            sows.append(created["public_id"])
+
+        await setup_tx.commit()
+
+    except BaseException:
+        await setup_tx.rollback()
+
+        raise
+
+    finally:
+        await holder.__aexit__(None, None, None)
+
+    async def _race(sow_pid: str) -> str:
+
+        manager, connection, tx = await _open()
+
+        try:
+            await connection.execute(
+                text("UPDATE public.sows SET status = 'PENDING_APPROVAL' WHERE public_id = :pid"),
+                {"pid": sow_pid},
+            )
+
+            await tx.commit()
+
+            return "activated"
+
+        except BaseException:
+            await tx.rollback()
+
+            raise
+
+        finally:
+            await manager.__aexit__(None, None, None)
+
+    results = await asyncio.wait_for(
+        asyncio.gather(_race(sows[0]), _race(sows[1]), return_exceptions=True),
+        timeout=120,
+    )
+
+    wins = [r for r in results if r == "activated"]
+
+    losses = [r for r in results if isinstance(r, BaseException)]
+
+    assert len(wins) == 1, results
+
+    assert len(losses) == 1
+
+    assert isinstance(losses[0], DBAPIError)
+
+    await conn.execute(
+        text(
+            "DELETE FROM public.sow_roles WHERE sow_id IN "
+            "(SELECT id FROM public.sows WHERE public_id IN (:a, :b))"
+        ),
+        {"a": sows[0], "b": sows[1]},
+    )
+
+    await conn.execute(
+        text("DELETE FROM public.sows WHERE public_id IN (:a, :b)"),
+        {"a": sows[0], "b": sows[1]},
+    )
+
+    await conn.execute(
+        text(
+            "DELETE FROM public.project_roles WHERE project_id = "
+            "(SELECT id FROM public.projects WHERE public_id = :p)"
+        ),
+        {"p": project["public_id"]},
+    )
+
+    await conn.execute(
+        text("DELETE FROM public.projects WHERE public_id = :p"), {"p": project["public_id"]}
+    )
+
+
+async def test_partial_payments_settle_invoice_in_steps(conn, skeleton, tenants) -> None:
+    """$6,000 of $10,000 -> PARTIALLY_PAID with $4,000 due; then PAID."""
+    from app.services import invoicing, payments
+
+    tenant = tenants["admin"]
+    invoice = await _approved_invoice(
+        conn, skeleton, tenant, tenants["worker"].company_id, Decimal("1000.00")
+    )
+
+    async def _pay(amount: Decimal) -> dict[str, Any]:
+        made = await _completed_payment(conn, tenant, amount=amount)
+        await payments.allocate_payment(
+            conn,
+            company_id=tenant.company_id,
+            payment_public_id=str(made["public_id"]),
+            actor_user_id=tenant.user_id,
+            request_id="flow",
+            ip_address=None,
+            allocations=[{"invoice_id": str(invoice["public_id"]), "amount": amount}],
+        )
+        return await invoicing.get_invoice(
+            conn, company_id=tenant.company_id, public_id=str(invoice["public_id"])
+        )
+
+    first = await _pay(Decimal("600.00"))
+    assert first["status"] == "PARTIALLY_PAID"
+    assert Decimal(str(first["amount_paid"])) == Decimal("600.0000")
+    assert Decimal(str(first["balance_due"])) == Decimal("400.0000")
+
+    second = await _pay(Decimal("400.00"))
+    assert second["status"] == "PAID"
+    assert Decimal(str(second["balance_due"])) == Decimal("0.0000")
+
+
+# =============================================================================
+# document authorization (§55)
+# =============================================================================
+async def test_document_download_refuses_foreign_company(
+    conn, skeleton, tenants, other_tenant_conn
+) -> None:
+    """Company B cannot download company A's document, by id or by guessing."""
+    _ = skeleton
+    from app.services import documents
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    doc = await _one(
+        conn,
+        "INSERT INTO public.documents (company_id, owner_user_id, doc_type, title, visibility)"
+        " VALUES (CAST(:c AS uuid), CAST(:u AS uuid), 'OTHER', 'Board minutes', 'PRIVATE')"
+        " RETURNING public_id",
+        {"c": admin.company_id, "u": admin.user_id},
+    )
+
+    with pytest.raises(ResourceNotFoundError) as caught:
+        await documents.download_url(
+            other_tenant_conn,
+            company_id=worker.company_id,
+            public_id=str(doc["public_id"]),
+            actor_user_id=worker.user_id,
+            request_id="flow",
+            ip_address=None,
+        )
+    assert caught.value.status_code == 404
+
+
+# =============================================================================
+# list filters (§47)
+# =============================================================================
+async def test_status_filter_accepts_comma_lists(conn, skeleton, tenants) -> None:
+    """Tab bars can request several statuses in one round trip."""
+    _ = skeleton
+    from app.services import code
+
+    tenant = tenants["admin"]
+    first = await _draft_project(conn, tenants, name="TabProbe Alpha")
+    second = await _draft_project(conn, tenants, name="TabProbe Beta")
+    await _move_project(conn, tenants, second["public_id"], "ACTIVE")
+
+    async def _list(status: str | None) -> list[str]:
+        rows = await code.list_projects(
+            conn,
+            company_id=tenant.company_id,
+            search="TabProbe",
+            status=status,
+            client_company_id=None,
+            owner_user_id=None,
+            cursor_keys={},
+            limit=25,
+        )
+        return sorted(r["public_id"] for r in rows)
+
+    assert await _list("DRAFT") == [first["public_id"]]
+    assert await _list("DRAFT,ACTIVE") == sorted([first["public_id"], second["public_id"]])
+    assert await _list("CANCELLED") == []
+
+
+async def test_project_mine_filter_narrows_to_owned(conn, skeleton, tenants) -> None:
+    """The Mine tab shows only projects owned by the caller."""
+    _ = skeleton
+    from app.services import code
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    mine = await _draft_project(conn, tenants, name="TabProbe Mine")
+    await _draft_project(
+        conn,
+        tenants,
+        name="TabProbe Theirs",
+        owner_user_id=worker.user_public_id,
+    )
+    rows = await code.list_projects(
+        conn,
+        company_id=admin.company_id,
+        search="TabProbe",
+        status=None,
+        client_company_id=None,
+        owner_user_id=admin.user_public_id,
+        cursor_keys={},
+        limit=25,
+    )
+    assert [r["public_id"] for r in rows] == [mine["public_id"]]
+
+
+async def test_invoice_direction_filter_separates_payables(conn, skeleton, tenants) -> None:
+    """RECEIVABLE is the default listing; PAYABLE credit notes list apart."""
+    from app.services import invoicing
+
+    admin, worker = tenants["admin"], tenants["worker"]
+    invoice = await _approved_invoice(conn, skeleton, admin, worker.company_id, Decimal("1000.00"))
+    note = await invoicing.issue_credit_note(
+        conn,
+        company_id=admin.company_id,
+        public_id=str(invoice["public_id"]),
+        actor_user_id=admin.user_id,
+        request_id="flow",
+        ip_address=None,
+        amount=Decimal("100.00"),
+        reason="Goodwill adjustment.",
+    )
+    assert note["direction"] == "PAYABLE"
+
+    async def _ids(direction: str | None) -> list[str]:
+        rows = await invoicing.list_invoices(
+            conn,
+            company_id=admin.company_id,
+            direction=direction,
+            cursor_keys={},
+            limit=50,
+        )
+        return [r["public_id"] for r in rows]
+
+    default_ids = await _ids(None)
+    assert str(invoice["public_id"]) in default_ids
+    assert str(note["public_id"]) not in default_ids
+    payable_ids = await _ids("PAYABLE")
+    assert str(note["public_id"]) in payable_ids
+    assert str(invoice["public_id"]) not in payable_ids
+
+
+# =============================================================================
+# contract termination date (§31)
+# =============================================================================
+async def test_termination_date_defaults_and_validates(conn, skeleton, tenants) -> None:
+    """Effective date defaults past notice, rejects past or shortened dates."""
+    from datetime import timedelta
+
+    from app.core.clock import utc_today
+    from app.services import contracts
+
+    tenant = tenants["admin"]
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {"counterparty_company_id": tenants["worker"].company_public_id},
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+    contract_pid = active["contract_ids"][0]
+    await conn.execute(
+        text(
+            "UPDATE public.contracts SET status = 'ACTIVE', termination_notice_days = 30"
+            " WHERE public_id = :pid"
+        ),
+        {"pid": contract_pid},
+    )
+
+    async def _terminate(day: Any) -> dict[str, Any]:
+        return await contracts.terminate_contract(
+            conn,
+            company_id=tenant.company_id,
+            public_id=contract_pid,
+            actor_user_id=tenant.user_id,
+            request_id="flow",
+            ip_address=None,
+            reason="Ending early.",
+            effective_date=day,
+        )
+
+    today = utc_today()
+    with pytest.raises(ValidationError) as caught:
+        await _terminate(today - timedelta(days=1))
+    assert caught.value.details["reason"] == "EFFECTIVE_DATE_IN_PAST"
+
+    with pytest.raises(BusinessRuleViolationError) as refused:
+        await _terminate(today + timedelta(days=10))
+    assert refused.value.details["reason"] == "NOTICE_PERIOD_NOT_SATISFIED"
+
+    done = await _terminate(today + timedelta(days=45))
+    assert done["status"] == "TERMINATED"
+
+    end = (
+        await conn.execute(
+            text("SELECT notice_period_end FROM public.contracts WHERE public_id = :pid"),
+            {"pid": contract_pid},
+        )
+    ).scalar_one()
+    assert str(end) == str(today + timedelta(days=45))

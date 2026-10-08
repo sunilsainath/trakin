@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Send,
   ShieldAlert,
+  Sparkles,
   Users,
   X,
 } from 'lucide-react'
@@ -21,7 +22,7 @@ import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
 import { useCompanyMutation } from '@/hooks/use-mutations'
 import { formatCurrency, formatDate, formatDateTime } from '@/lib/utils'
-import type { Contract, VersionRow } from '@/lib/domain-types'
+import type { Contract, Invoice, Timesheet, VersionRow } from '@/lib/domain-types'
 import {
   Button,
   Card,
@@ -46,7 +47,7 @@ import {
   ReasonDialog,
 } from '@/components/destructive'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingBlock, errorMessage, useCompanyQuery } from '@/components/query'
+import { ErrorState, LoadingBlock, PermissionState, errorMessage, isPermissionError, useCompanyQuery } from '@/components/query'
 import { notifyError, notifySuccess } from '@/components/toast'
 
 type LifecycleAction =
@@ -137,7 +138,11 @@ export default function ContractDetailPage() {
     return (
       <PageShell>
         <div className="space-y-4">
-          <ErrorState error={contract.error} onRetry={() => void contract.refetch()} />
+          {isPermissionError(contract.error) ? (
+            <PermissionState error={contract.error} />
+          ) : (
+            <ErrorState error={contract.error} onRetry={() => void contract.refetch()} />
+          )}
           <Link href="/contracts" className="text-sm font-medium text-primary hover:underline">
             Back to contracts
           </Link>
@@ -313,8 +318,12 @@ export default function ContractDetailPage() {
             { key: 'roles', label: 'Roles', badge: data.roles.length },
             { key: 'parties', label: 'Parties', badge: data.parties.length },
             { key: 'lines', label: 'Line items', badge: data.line_items.length },
+            { key: 'invoices', label: 'Invoices' },
+            { key: 'timesheets', label: 'Timesheets' },
+            { key: 'documents', label: 'Documents' },
             { key: 'approvals', label: 'Approvals', badge: data.approval_steps.length },
             { key: 'trail', label: 'Versions & trail' },
+            { key: 'ai', label: 'AI insights' },
           ]}
           active={tab}
           onChange={setTab}
@@ -325,8 +334,18 @@ export default function ContractDetailPage() {
         {tab === 'roles' ? <RolesTab contract={data} /> : null}
         {tab === 'parties' ? <PartiesTab contract={data} /> : null}
         {tab === 'lines' ? <LineItemsTab contract={data} /> : null}
+        {tab === 'invoices' ? (
+          <ContractInvoicesTab companyPublicId={activeCompanyPublicId} contractId={contractId} />
+        ) : null}
+        {tab === 'timesheets' ? (
+          <ContractTimesheetsTab companyPublicId={activeCompanyPublicId} contractId={contractId} />
+        ) : null}
+        {tab === 'documents' ? (
+          <ContractDocumentsTab companyPublicId={activeCompanyPublicId} contractId={contractId} />
+        ) : null}
         {tab === 'approvals' ? <ApprovalsTab contract={data} /> : null}
         {tab === 'trail' ? <TrailTab contract={data} versions={versions} /> : null}
+        {tab === 'ai' ? <ContractAiTab contract={data} /> : null}
 
         {/* ------------------------------------------------------------- */}
         {/* Lifecycle dialogs                                                */}
@@ -972,6 +991,7 @@ function LifecycleDialog({
 
   const reasonConfig = kind ? destructive[kind] : undefined
   if (reasonConfig) {
+    const isTerminate = kind === 'terminate'
     return (
       <ReasonDialog
         open
@@ -980,9 +1000,20 @@ function LifecycleDialog({
         description={reasonConfig.description}
         confirmLabel={reasonConfig.title.split(' ')[0] ?? 'Confirm'}
         label="Reason"
+        dateLabel={isTerminate ? 'Effective date (optional)' : undefined}
+        dateHint={
+          isTerminate
+            ? 'Defaults to the end of the agreed notice period. It cannot precede today.'
+            : undefined
+        }
         busy={busy}
         error={error}
-        onConfirm={(reason) => onConfirm(reasonConfig.path, { reason })}
+        onConfirm={(reason, date) =>
+          onConfirm(
+            reasonConfig.path,
+            isTerminate && date ? { reason, effective_date: date } : { reason },
+          )
+        }
       />
     )
   }
@@ -1246,5 +1277,246 @@ function LinkedRecord({
         <PublicId value={id} kind={kind} href={href} />
       )}
     </div>
+  )
+}
+interface RelatedListProps {
+  companyPublicId: string | null
+  contractId: string
+}
+
+function ContractInvoicesTab({ companyPublicId, contractId }: RelatedListProps) {
+  const list = useCompanyQuery<{ data: Invoice[] }>({
+    companyPublicId,
+    queryKey: ['contracts', 'invoices', contractId],
+    path: '/invoices',
+    queryParams: `?contract_id=${contractId}&limit=50`,
+  })
+  if (list.isPending) return <LoadingBlock rows={3} />
+  if (list.isError) return <ErrorState error={list.error} onRetry={() => void list.refetch()} />
+  const rows = list.data?.data ?? []
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        title="No invoices yet"
+        description="Invoices appear here once approved timesheets on this contract are billed."
+      />
+    )
+  }
+  return (
+    <DataTable
+      columns={[
+        {
+          key: 'number',
+          header: 'Invoice',
+          cell: (row: Invoice) => (
+            <div className="min-w-0">
+              <Link
+                href={`/invoices/${row.public_id}`}
+                className="block truncate font-medium hover:text-primary-strong"
+              >
+                {row.invoice_number ?? row.public_id}
+              </Link>
+              <PublicId value={row.public_id} kind="invoice" />
+            </div>
+          ),
+        },
+        {
+          key: 'status',
+          header: 'Status',
+          cell: (row: Invoice) => <StatusBadge status={row.status} />,
+        },
+        {
+          key: 'total',
+          header: 'Total',
+          numeric: true,
+          cell: (row: Invoice) => formatCurrency(row.total_amount, row.currency),
+        },
+        {
+          key: 'balance',
+          header: 'Balance',
+          numeric: true,
+          cell: (row: Invoice) => formatCurrency(row.balance_due, row.currency),
+        },
+        {
+          key: 'due',
+          header: 'Due',
+          cell: (row: Invoice) => formatDate(row.due_date),
+        },
+      ]}
+      rows={rows}
+      rowKey={(row: Invoice) => row.public_id}
+      caption="Invoices billed against this contract"
+      exportName={`contract-${contractId}-invoices`}
+    />
+  )
+}
+
+function ContractTimesheetsTab({ companyPublicId, contractId }: RelatedListProps) {
+  const list = useCompanyQuery<{ data: Timesheet[] }>({
+    companyPublicId,
+    queryKey: ['contracts', 'timesheets', contractId],
+    path: '/timesheets',
+    queryParams: `?contract_id=${contractId}&limit=50`,
+  })
+  if (list.isPending) return <LoadingBlock rows={3} />
+  if (list.isError) return <ErrorState error={list.error} onRetry={() => void list.refetch()} />
+  const rows = list.data?.data ?? []
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        title="No timesheets yet"
+        description="Submitted timesheets against this contract's roles appear here with their approval state."
+      />
+    )
+  }
+  return (
+    <DataTable
+      columns={[
+        {
+          key: 'period',
+          header: 'Period',
+          cell: (row: Timesheet) => (
+            <span>
+              {formatDate(row.period_start)} &ndash; {formatDate(row.period_end)}
+            </span>
+          ),
+        },
+        {
+          key: 'who',
+          header: 'Person',
+          cell: (row: Timesheet) => (
+            <span className="text-sm">{row.user_name ?? row.user_id}</span>
+          ),
+        },
+        {
+          key: 'status',
+          header: 'Status',
+          cell: (row: Timesheet) => <StatusBadge status={row.status} />,
+        },
+        {
+          key: 'hours',
+          header: 'Billable hours',
+          numeric: true,
+          cell: (row: Timesheet) => row.billable_hours,
+        },
+        {
+          key: 'amount',
+          header: 'Amount',
+          numeric: true,
+          cell: (row: Timesheet) => formatCurrency(row.total_amount, row.currency),
+        },
+      ]}
+      rows={rows}
+      rowKey={(row: Timesheet) => row.public_id}
+      caption="Timesheets against this contract"
+      exportName={`contract-${contractId}-timesheets`}
+    />
+  )
+}
+
+interface EntityDocument {
+  public_id: string
+  title: string
+  doc_type: string
+  status: string
+  version_count: number
+  created_at: string
+}
+
+function ContractDocumentsTab({ companyPublicId, contractId }: RelatedListProps) {
+  const list = useCompanyQuery<{ data: EntityDocument[] }>({
+    companyPublicId,
+    queryKey: ['contracts', 'documents', contractId],
+    path: `/documents/for/CONTRACT/${contractId}`,
+  })
+  if (list.isPending) return <LoadingBlock rows={3} />
+  if (list.isError) return <ErrorState error={list.error} onRetry={() => void list.refetch()} />
+  const rows = list.data?.data ?? []
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        title="No documents attached"
+        description="Upload contract documents from the documents library by linking them to this contract."
+      />
+    )
+  }
+  return (
+    <DataTable
+      columns={[
+        {
+          key: 'title',
+          header: 'Document',
+          cell: (row: EntityDocument) => (
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{row.title}</p>
+              <PublicId value={row.public_id} />
+            </div>
+          ),
+        },
+        {
+          key: 'type',
+          header: 'Type',
+          cell: (row: EntityDocument) => <StatusBadge status={row.doc_type} />,
+        },
+        {
+          key: 'versions',
+          header: 'Versions',
+          numeric: true,
+          cell: (row: EntityDocument) => row.version_count,
+        },
+        {
+          key: 'created',
+          header: 'Added',
+          cell: (row: EntityDocument) => formatDateTime(row.created_at),
+        },
+      ]}
+      rows={rows}
+      rowKey={(row: EntityDocument) => row.public_id}
+      caption="Documents attached to this contract"
+      exportName={`contract-${contractId}-documents`}
+    />
+  )
+}
+
+function ContractAiTab({ contract }: { contract: Contract }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Sparkles aria-hidden className="size-4 text-primary" />
+          Contract intelligence
+        </CardTitle>
+        <CardDescription>
+          Ask the assistant about this contract&apos;s risks, obligations and deadlines.
+          Answers are permission-filtered and cite their sources.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href={`/assistant?q=${encodeURIComponent(`Summarise contract ${contract.public_id}: key obligations, risks and deadlines.`)}`}
+          >
+            <Button variant="outline" size="sm">
+              <Sparkles aria-hidden />
+              Summarise this contract
+            </Button>
+          </Link>
+          <Link
+            href={`/assistant?q=${encodeURIComponent(`What are the payment terms and risks in contract ${contract.public_id}?`)}`}
+          >
+            <Button variant="outline" size="sm">
+              <Sparkles aria-hidden />
+              Analyse payment terms
+            </Button>
+          </Link>
+        </div>
+        {contract.risk_score !== null && contract.risk_score !== undefined ? (
+          <p className="text-sm text-muted-foreground">
+            Stored risk score:{' '}
+            <span className="font-medium text-foreground">{contract.risk_score}</span>
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
   )
 }

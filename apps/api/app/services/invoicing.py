@@ -32,7 +32,7 @@ from app.core.errors import (
 from app.core.logging import get_logger
 from app.services import audit
 from app.services.code import _json
-from app.services.lookup import as_decimal, resolve_scoped
+from app.services.lookup import apply_status_filter, as_decimal, resolve_scoped
 
 logger = get_logger(__name__)
 
@@ -178,8 +178,11 @@ async def get_invoice(
             await conn.execute(
                 text(
                     """
-                    SELECT step_no, name, status, notes, requested_at, decided_at
-                      FROM public.invoice_approvals WHERE invoice_id = :iid ORDER BY step_no
+                    SELECT a.step_no, a.name, a.status, a.notes, a.requested_at,
+                           a.decided_at, u.public_id AS approver_public_id
+                      FROM public.invoice_approvals a
+                      LEFT JOIN public.users u ON u.id = a.approver_user_id
+                     WHERE a.invoice_id = :iid ORDER BY a.step_no
                     """
                 ),
                 {"iid": row["id"]},
@@ -267,6 +270,7 @@ async def list_invoices(
     company_id: uuid.UUID,
     status: str | None = None,
     statuses: list[str] | None = None,
+    direction: str | None = None,
     project_public_id: str | None = None,
     contract_public_id: str | None = None,
     counterparty_company_id: str | None = None,
@@ -277,15 +281,20 @@ async def list_invoices(
     limit: int,
     cursor_keys: dict[str, str],
 ) -> list[dict[str, Any]]:
-    where = ["i.company_id = :cid", "i.deleted_at IS NULL", "i.direction = 'RECEIVABLE'"]
+    where = ["i.company_id = :cid", "i.deleted_at IS NULL"]
     params: dict[str, Any] = {"cid": company_id, "limit": limit + 1}
 
-    if status:
-        where.append("i.status = :status")
-        params["status"] = status
-    if statuses:
-        where.append("i.status = ANY(CAST(:statuses AS text[]))")
-        params["statuses"] = statuses
+    flow = (direction or "RECEIVABLE").upper()
+    if flow not in ("RECEIVABLE", "PAYABLE"):
+        raise ValidationError(
+            "Invoice direction is RECEIVABLE or PAYABLE.",
+            details={"direction": direction, "reason": "UNKNOWN_DIRECTION"},
+        )
+    where.append("i.direction = :direction")
+    params["direction"] = flow
+
+    combined = ",".join([*(statuses or []), *([status] if status else [])])
+    apply_status_filter(where, params, "i.status", combined or None)
     if project_public_id:
         project = await resolve_scoped(conn, "projects", project_public_id, company_id)
         where.append("i.project_id = :pid")
@@ -569,6 +578,15 @@ async def generate_invoice(
             details={"reason": "NOTHING_TO_BILL"},
         )
 
+    requires_sheets = bool(contract.get("requires_timesheets", True))
+    has_timesheet_items = any(i.get("line_type") == "TIMESHEET" for i in preview["items"])
+    if requires_sheets and not has_timesheet_items:
+        raise BusinessRuleViolationError(
+            "This contract requires timesheets: no approved timesheet lines are "
+            "billable in this period.",
+            details={"reason": "TIMESHEETS_REQUIRED"},
+        )
+
     existing = await conn.execute(
         text(
             """
@@ -770,7 +788,7 @@ async def _apply_invoice_adjustment(
                 INSERT INTO public.invoice_items
                   (invoice_id, contract_id, line_type, description, quantity, unit,
                    unit_rate, currency)
-                VALUES (:invoice, :contract, 'ADDITIONAL', 'Adjustment', 1, 'LOT',
+                VALUES (:invoice, :contract, 'FIXED', 'Adjustment', 1, 'LOT',
                         :amount, (SELECT currency FROM public.invoices WHERE id = :invoice))
                 """
             ),
@@ -822,6 +840,21 @@ async def transition_invoice(
         await conn.execute(
             text("UPDATE public.invoices SET locked = true WHERE id = :rid"), {"rid": before["id"]}
         )
+
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="INVOICE_STATUS_CHANGED",
+        aggregate_type="invoice",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=current,
+        new=target,
+        idempotency_key=f"invoice:{public_id}:{target}",
+    )
 
     await audit.record(
         conn,
@@ -877,6 +910,21 @@ async def submit_for_approval(
         ),
         {"iid": before["id"], "cid": company_id},
     )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="INVOICE_STATUS_CHANGED",
+        aggregate_type="invoice",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=current,
+        new="PENDING",
+        idempotency_key=f"invoice:{public_id}:PENDING",
+    )
+
     await audit.record(
         conn,
         action="invoice.submitted_for_approval",
@@ -913,16 +961,41 @@ async def decide_approval(
             details={"status": invoice["status"]},
         )
 
+    # Segregation of duties, mirrored from the database trigger so the refusal
+    # is a typed 409 rather than a raw privilege error: the user who created
+    # the invoice cannot decide its approval unless the company explicitly
+    # allows self-approval.
+    if str(invoice["created_by"]) == str(actor_user_id):
+        allowed = await conn.execute(
+            text(
+                "SELECT COALESCE((settings->'segregation_of_duties'->>'allow_self_approval'),"
+                " 'false')::boolean FROM public.companies WHERE id = :cid"
+            ),
+            {"cid": company_id},
+        )
+        if not allowed.scalar():
+            raise BusinessRuleViolationError(
+                "You cannot approve an invoice you created.",
+                details={"reason": "SEGREGATION_OF_DUTIES"},
+            )
+
     updated = await conn.execute(
         text(
             """
             UPDATE public.invoice_approvals
-               SET status = :decision, decided_at = now(), notes = :notes
+               SET status = :decision, decided_at = now(), notes = :notes,
+                   approver_user_id = :actor
              WHERE invoice_id = :iid AND step_no = :step AND status = 'PENDING'
             RETURNING step_no
             """
         ),
-        {"decision": decision, "notes": notes, "iid": invoice["id"], "step": step_no},
+        {
+            "decision": decision,
+            "notes": notes,
+            "actor": actor_user_id,
+            "iid": invoice["id"],
+            "step": step_no,
+        },
     )
     if updated.mappings().first() is None:
         raise ResourceNotFoundError("That approval step is not pending.")
@@ -944,6 +1017,21 @@ async def decide_approval(
             ),
             {"reason": notes, "rid": invoice["id"]},
         )
+
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="INVOICE_STATUS_CHANGED",
+        aggregate_type="invoice",
+        aggregate_id=invoice["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=str(invoice["status"]),
+        new="APPROVED" if decision == "APPROVED" else "REJECTED",
+        idempotency_key=f"invoice:{public_id}:decision",
+    )
 
     await audit.record(
         conn,
@@ -1065,18 +1153,18 @@ async def issue_credit_note(
     await conn.execute(
         text(
             """
-            INSERT INTO public.invoice_items
-              (invoice_id, contract_id, line_type, description, quantity, unit,
-               unit_rate, currency)
-            VALUES (:invoice, :contract, 'ADDITIONAL', :description, 1, 'LOT',
-                    :amount, :currency)
+                    INSERT INTO public.invoice_items
+                      (invoice_id, contract_id, line_type, description, quantity, unit,
+                       unit_rate, currency)
+                    VALUES (:invoice, :contract, 'FIXED', :description, 1, 'LOT',
+                            :amount, :currency)
             """
         ),
         {
             "invoice": credit["id"],
             "contract": credit["contract_id"],
             "description": f"Credit note against {source['invoice_number'] or source['public_id']}",
-            "amount": -money(amount),
+            "amount": money(amount),
             "currency": credit["currency"],
         },
     )

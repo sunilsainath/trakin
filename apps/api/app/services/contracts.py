@@ -29,6 +29,7 @@ from app.core.logging import get_logger
 from app.services import audit
 from app.services.code import CONTRACT_TRANSITIONS, _json, _jsonable
 from app.services.lookup import (
+    apply_status_filter,
     as_decimal,
     json_or_empty,
     resolve_company_public_id,
@@ -353,9 +354,7 @@ async def list_contracts(
         sow = await resolve_scoped(conn, "sows", sow_public_id, company_id)
         where.append("c.sow_id = :sid")
         params["sid"] = sow["id"]
-    if status:
-        where.append("c.status = :status")
-        params["status"] = status
+    apply_status_filter(where, params, "c.status", status)
     if search:
         where.append("c.title ILIKE :q")
         params["q"] = f"%{search}%"
@@ -1249,6 +1248,21 @@ async def send_contract(
         text("UPDATE public.contracts SET status = 'SENT', sent_at = now() WHERE id = :rid"),
         {"rid": before["id"]},
     )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="CONTRACT_STATUS_CHANGED",
+        aggregate_type="contract",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=current,
+        new="SENT",
+        idempotency_key=f"contract:{public_id}:SENT",
+    )
+
     await audit.record(
         conn,
         action="contract.sent",
@@ -1320,6 +1334,21 @@ async def respond_to_contract(
         {"cid": before["id"]},
     )
 
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="CONTRACT_STATUS_CHANGED",
+        aggregate_type="contract",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=current,
+        new="ACCEPTED" if accept else "DECLINED",
+        idempotency_key=f"contract:{public_id}:{target}",
+    )
+
     await audit.record(
         conn,
         action="contract.accepted" if accept else "contract.declined",
@@ -1361,6 +1390,21 @@ async def activate_contract(
     # `app.activate_assignments_on_contract` fires on the status change above and
     # switches PENDING assignments to ACTIVE, so no explicit call is made here.
 
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="CONTRACT_STATUS_CHANGED",
+        aggregate_type="contract",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old="ACCEPTED",
+        new="ACTIVE",
+        idempotency_key=f"contract:{public_id}:ACTIVE",
+    )
+
     await audit.record(
         conn,
         action="contract.activated",
@@ -1387,6 +1431,7 @@ async def terminate_contract(
     request_id: str,
     ip_address: str | None,
     reason: str,
+    effective_date: date | None = None,
 ) -> dict[str, Any]:
     before = await resolve_scoped(conn, "contracts", public_id, company_id, lock=True)
     current = str(before["status"])
@@ -1416,9 +1461,21 @@ async def terminate_contract(
         )
 
     notice = before.get("termination_notice_days")
-    effective = utc_today()
-    if notice:
-        effective = utc_today() + timedelta(days=int(notice))
+    floor = utc_today() + timedelta(days=int(notice or 0))
+    if effective_date is None:
+        effective = floor
+    else:
+        if effective_date < utc_today():
+            raise ValidationError(
+                "The termination date cannot precede today.",
+                details={"reason": "EFFECTIVE_DATE_IN_PAST"},
+            )
+        if effective_date < floor:
+            raise BusinessRuleViolationError(
+                "The termination date cannot cut the agreed notice period short.",
+                details={"reason": "NOTICE_PERIOD_NOT_SATISFIED"},
+            )
+        effective = effective_date
 
     await conn.execute(
         text(
@@ -1435,6 +1492,21 @@ async def terminate_contract(
             """
         ),
         {"cid": before["id"], "eff": effective},
+    )
+
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="CONTRACT_STATUS_CHANGED",
+        aggregate_type="contract",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=current,
+        new="TERMINATED",
+        idempotency_key=f"contract:{public_id}:TERMINATED",
     )
 
     await audit.record(
@@ -1473,6 +1545,21 @@ async def close_contract(
     await conn.execute(
         text("UPDATE public.contracts SET status = 'CLOSED' WHERE id = :rid"), {"rid": before["id"]}
     )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="CONTRACT_STATUS_CHANGED",
+        aggregate_type="contract",
+        aggregate_id=before["id"],
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        public_id=public_id,
+        old=str(before["status"]),
+        new="CLOSED",
+        idempotency_key=f"contract:{public_id}:CLOSED",
+    )
+
     await audit.record(
         conn,
         action="contract.closed",
@@ -1529,6 +1616,9 @@ async def renew_contract(
         }
     )
     metadata["renewals"] = history
+    # A renewed contract starts a fresh warning cycle (the sweep tracks warned
+    # tiers here; the DELETE above removes the stale inbox rows).
+    metadata.pop("expiry_notified_tiers", None)
     if contract_value is not None:
         from app.services.billing import money
 
@@ -1551,6 +1641,17 @@ async def renew_contract(
             "rid": before["id"],
         },
     )
+    # A renewed contract starts a fresh warning cycle: yesterday's tier
+    # notifications are removed so the new period warns again on approach.
+    # Without this, the (user, type, resource) UNIQUE key would suppress the
+    # new period's warnings as duplicates of the old period's.
+    await conn.execute(
+        text(
+            "DELETE FROM platform.notifications"
+            " WHERE resource_id = :rid AND type LIKE 'CONTRACT_EXPIRING%'"
+        ),
+        {"rid": before["id"]},
+    )
     await audit.record(
         conn,
         action="contract.renewed",
@@ -1569,6 +1670,116 @@ async def renew_contract(
         ip_address=ip_address,
     )
     return await get_contract(conn, company_id=company_id, public_id=public_id)
+
+
+EXPIRY_WARNING_TIERS: tuple[int, ...] = (7, 30, 60, 90)
+
+
+async def run_contract_expiry_sweep(conn: AsyncConnection) -> dict[str, int]:
+    """Flip past-due ACTIVE contracts to EXPIRED and warn on approaching ones.
+
+    Runs daily from the beat schedule. The status flip and its audit row land
+    in the same transaction; warnings go out once per tier through the
+    notification UNIQUE key, so reruns are no-ops. Renewal deletes the warning
+    rows, restarting the cycle for the new period.
+    """
+    from app.core.clock import utc_today
+    from app.services import events as event_service
+
+    today = utc_today()
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT id, public_id, company_id, title, end_date, metadata
+                      FROM public.contracts
+                     WHERE status = 'ACTIVE'
+                       AND deleted_at IS NULL
+                       AND end_date IS NOT NULL
+                       AND end_date <= CAST(:today AS date) + 90
+                     ORDER BY end_date
+                    """
+                ),
+                {"today": today},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    expired = notified = 0
+    for r in rows:
+        meta = json_or_empty(r["metadata"])
+        warned = set(meta.get("expiry_notified_tiers") or [])
+        days_left = (r["end_date"] - today).days
+        if days_left < 0:
+            if "expired" in warned:
+                continue
+            await conn.execute(
+                text("UPDATE public.contracts SET status = 'EXPIRED' WHERE id = :rid"),
+                {"rid": r["id"]},
+            )
+            await audit.record(
+                conn,
+                action="contract.expired",
+                resource_type="contract",
+                resource_id=r["id"],
+                resource_public_id=str(r["public_id"]),
+                company_id=r["company_id"],
+                actor_type="SYSTEM",
+                actor_label="expiry sweep",
+                old_values={"status": "ACTIVE"},
+                new_values={"status": "EXPIRED"},
+                request_id="expiry-sweep",
+            )
+            got = await event_service.notify_aggregate(
+                conn,
+                event_type="CONTRACT_EXPIRED",
+                title=f"Contract expired: {r['title']}",
+                body=f"Ended on {r['end_date']}. Renew or close it.",
+                severity="CRITICAL",
+                aggregate_type="contract",
+                aggregate_id=str(r["id"]),
+                company_id=r["company_id"],
+                public_id=str(r["public_id"]),
+                metadata={"days_overdue": -days_left},
+            )
+            if got:
+                warned.add("expired")
+                meta["expiry_notified_tiers"] = sorted(warned)
+                await conn.execute(
+                    text("UPDATE public.contracts SET metadata = CAST(:meta AS jsonb)"),
+                    {"meta": _json(meta)},
+                )
+            notified += got
+            expired += 1
+            continue
+        tier = min(t for t in EXPIRY_WARNING_TIERS if days_left <= t)
+        if tier in warned:
+            continue
+        got = await event_service.notify_aggregate(
+            conn,
+            event_type=f"CONTRACT_EXPIRING_{tier}D",
+            title=f"Contract expiring in {days_left} days: {r['title']}",
+            body=f"Ends on {r['end_date']}. Review renewal before the date passes.",
+            # platform.notifications.severity only knows
+            # INFO/SUCCESS/WARNING/CRITICAL (HIGH/MEDIUM belong to ai_insights).
+            severity="WARNING" if tier <= 30 else "INFO",
+            aggregate_type="contract",
+            aggregate_id=str(r["id"]),
+            company_id=r["company_id"],
+            public_id=str(r["public_id"]),
+            metadata={"days_left": days_left, "tier_days": tier},
+        )
+        if got:
+            warned.add(tier)
+            meta["expiry_notified_tiers"] = sorted(warned)
+            await conn.execute(
+                text("UPDATE public.contracts SET metadata = CAST(:meta AS jsonb) WHERE id = :rid"),
+                {"meta": _json(meta), "rid": r["id"]},
+            )
+        notified += got
+    return {"expired": expired, "notified": notified, "scanned": len(rows)}
 
 
 async def contract_versions(

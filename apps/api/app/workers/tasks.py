@@ -340,6 +340,8 @@ async def advance_payment_schedules() -> dict[str, int]:
 @async_task(name="app.workers.tasks.scan_contract_expiries", queue="bulk")
 async def scan_contract_expiries() -> dict[str, int]:
     """Raise expiry alerts so they exist before a deadline is missed."""
+    from app.services import contracts as contracts_service
+
     async with session_scope() as conn:
         result = await conn.execute(
             text(
@@ -384,7 +386,12 @@ async def scan_contract_expiries() -> dict[str, int]:
 
     if count:
         logger.info("contract_expiry_insights_created", count=count)
-    return {"created": count}
+
+    # Status flips, tiered warnings and their audit rows live in the service
+    # so tests can drive them without a broker.
+    sweep = await contracts_service.run_contract_expiry_sweep(conn)
+
+    return {"insights": count, **sweep}
 
 
 @async_task(name="app.workers.tasks.refresh_dashboard_stats", queue="bulk")

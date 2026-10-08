@@ -88,6 +88,17 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
+    label: 'Core',
+    items: [
+      {
+        href: '/core',
+        label: 'Overview',
+        icon: <LayoutDashboard aria-hidden />,
+        permission: 'dashboard.read',
+      },
+    ],
+  },
+  {
     label: 'Delivery',
     items: [
       {

@@ -264,3 +264,25 @@ def json_or_empty(value: Any) -> Any:
         except ValueError:
             return {}
     return value
+
+
+def apply_status_filter(
+    where: list[str], params: dict[str, Any], column: str, status: str | None
+) -> None:
+    """One status or a comma-separated set, for tab bars over list views.
+
+    Values are upper-cased to the enum vocabulary; unknown values simply match
+    nothing rather than erroring, so a tab can never break the list. The
+    column is always a caller-side literal, never request input.
+    """
+    if not status:
+        return
+    values = [part.strip().upper() for part in str(status).split(",") if part.strip()]
+    if not values:
+        return
+    if len(values) == 1:
+        where.append(column + " = :status")
+        params["status"] = values[0]
+    else:
+        where.append(column + " = ANY(CAST(:statuses AS text[]))")
+        params["statuses"] = values

@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 
-import { Button, Dialog, Label, Textarea } from '@/components/ui'
+import { Button, Dialog, Input, Label, Textarea } from '@/components/ui'
 import { errorMessage } from '@/components/query'
 
 /**
@@ -24,6 +24,8 @@ export function ReasonDialog({
   label = 'Reason',
   hint,
   minLength = 3,
+  dateLabel,
+  dateHint,
   busy,
   error,
   tone = 'danger',
@@ -37,19 +39,24 @@ export function ReasonDialog({
   label?: string
   hint?: string
   minLength?: number
+  /** When set, an optional date field is shown (e.g. a termination effective date). */
+  dateLabel?: string
+  dateHint?: string
   busy?: boolean
   error?: unknown
   tone?: 'danger' | 'primary'
-  onConfirm: (reason: string) => void
+  onConfirm: (reason: string, date: string | null) => void
 }) {
   const [reason, setReason] = React.useState('')
   const [touched, setTouched] = React.useState(false)
+  const [date, setDate] = React.useState('')
 
   // Reset between invocations so a previous reason is never resubmitted.
   React.useEffect(() => {
     if (open) {
       setReason('')
       setTouched(false)
+      setDate('')
     }
   }, [open, title])
 
@@ -75,7 +82,7 @@ export function ReasonDialog({
             onClick={() => {
               setTouched(true)
               if (reason.trim().length < minLength) return
-              onConfirm(reason.trim())
+              onConfirm(reason.trim(), date || null)
             }}
           >
             {confirmLabel}
@@ -108,6 +115,21 @@ export function ReasonDialog({
             Enter at least {minLength} characters. This reason is recorded in the
             audit log and cannot be edited later.
           </p>
+        ) : null}
+        {dateLabel ? (
+          <div className="space-y-1.5 pt-1">
+            <Label htmlFor="reason-dialog-date">{dateLabel}</Label>
+            <Input
+              id="reason-dialog-date"
+              type="date"
+              value={date}
+              onChange={(event) => setDate(event.target.value)}
+              disabled={busy}
+            />
+            {dateHint ? (
+              <p className="text-xs text-muted-foreground">{dateHint}</p>
+            ) : null}
+          </div>
         ) : null}
         {error ? (
           <p role="alert" className="text-xs font-medium text-danger">

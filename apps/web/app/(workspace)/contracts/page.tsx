@@ -7,7 +7,7 @@ import { FileText } from 'lucide-react'
 import { useCompany } from '@/hooks/use-company'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { CONTRACT_STATUSES, type Contract, type Page as PageEnvelope } from '@/lib/domain-types'
-import { Button, EmptyState } from '@/components/ui'
+import { Button, EmptyState, Tabs } from '@/components/ui'
 import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
 import { PublicId } from '@/components/public-id'
@@ -20,7 +20,7 @@ import {
   useDebouncedValue,
 } from '@/components/filters'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingTable } from '@/components/query'
+import { ErrorState, LoadingTable, PermissionState, isPermissionError } from '@/components/query'
 
 /**
  * Every contract in the company.
@@ -29,6 +29,49 @@ import { ErrorState, LoadingTable } from '@/components/query'
  * as an integer between 1 and 365, so an empty filter must be omitted entirely
  * rather than sent blank.
  */
+const CONTRACT_TABS = [
+  { key: 'all', label: 'All' },
+  { key: 'ACTIVE', label: 'Active' },
+  { key: 'DRAFT', label: 'Drafts' },
+  { key: 'SENT', label: 'Sent' },
+  { key: 'PENDING_ACCEPTANCE', label: 'Pending acceptance' },
+  { key: 'REJECTED', label: 'Rejected' },
+  { key: 'expiring', label: 'Expiring' },
+] as const
+
+function ContractStatusTabs({
+  list,
+}: {
+  list: {
+    filters: Record<string, unknown>
+    setFilter: (key: string, value: string) => void
+  }
+}) {
+  const expiring = (list.filters.expiring_within_days as string) ?? ''
+  const status = (list.filters.status as string) ?? ''
+  const active = expiring
+    ? 'expiring'
+    : CONTRACT_TABS.some((tab) => tab.key === status)
+      ? status
+      : 'all'
+  return (
+    <Tabs
+      tabs={[...CONTRACT_TABS]}
+      active={active}
+      onChange={(key) => {
+        if (key === 'expiring') {
+          list.setFilter('status', '')
+          list.setFilter('expiring_within_days', '30')
+        } else {
+          list.setFilter('expiring_within_days', '')
+          list.setFilter('status', key === 'all' ? '' : key)
+        }
+      }}
+      className="overflow-x-auto scrollbar-thin"
+    />
+  )
+}
+
 export default function ContractsPage() {
   const { activeCompanyPublicId } = useCompany()
   const [search, setSearch] = React.useState('')
@@ -157,10 +200,16 @@ export default function ContractsPage() {
           />
         </FilterBar>
 
+        <ContractStatusTabs list={list} />
+
         {list.query.isPending ? (
           <LoadingTable rows={8} columns={6} />
         ) : list.query.isError ? (
-          <ErrorState error={list.query.error} onRetry={() => void list.query.refetch()} />
+          isPermissionError(list.query.error) ? (
+            <PermissionState error={list.query.error} />
+          ) : (
+            <ErrorState error={list.query.error} onRetry={() => void list.query.refetch()} />
+          )
         ) : (
           <>
             <DataTable

@@ -10,6 +10,7 @@ import { INVOICE_STATUSES, type Invoice, type Page as PageEnvelope } from '@/lib
 import {
   Button,
   EmptyState,
+  Tabs,
 } from '@/components/ui'
 import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
@@ -24,7 +25,7 @@ import {
   useDebouncedValue,
 } from '@/components/filters'
 import { PageHeader, PageShell } from '@/components/page'
-import { ErrorState, LoadingTable } from '@/components/query'
+import { ErrorState, LoadingTable, PermissionState, isPermissionError } from '@/components/query'
 
 /**
  * Every invoice in the company.
@@ -33,6 +34,51 @@ import { ErrorState, LoadingTable } from '@/components/query'
  * the rest of the platform links to, and the human-readable number is what goes
  * on the paperwork the counterparty holds.
  */
+const INVOICE_TABS = [
+  { key: 'all', label: 'All' },
+  { key: 'receivable', label: 'Receivable' },
+  { key: 'payable', label: 'Payable' },
+  { key: 'DRAFT', label: 'Draft' },
+  { key: 'PAID', label: 'Paid' },
+  { key: 'REJECTED', label: 'Rejected' },
+] as const
+
+function InvoiceTabs({
+  list,
+}: {
+  list: {
+    filters: Record<string, unknown>
+    setFilter: (key: string, value: string) => void
+  }
+}) {
+  const direction = (list.filters.direction as string) ?? ''
+  const status = (list.filters.status as string) ?? ''
+  const active =
+    direction === 'RECEIVABLE'
+      ? 'receivable'
+      : direction === 'PAYABLE'
+        ? 'payable'
+        : INVOICE_TABS.some((tab) => tab.key === status)
+          ? status
+          : 'all'
+  return (
+    <Tabs
+      tabs={[...INVOICE_TABS]}
+      active={active}
+      onChange={(key) => {
+        if (key === 'receivable' || key === 'payable') {
+          list.setFilter('status', '')
+          list.setFilter('direction', key.toUpperCase())
+        } else {
+          list.setFilter('direction', '')
+          list.setFilter('status', key === 'all' ? '' : key)
+        }
+      }}
+      className="overflow-x-auto scrollbar-thin"
+    />
+  )
+}
+
 export default function InvoicesPage() {
   const { activeCompanyPublicId } = useCompany()
   const [search, setSearch] = React.useState('')
@@ -178,10 +224,16 @@ export default function InvoicesPage() {
           />
         </FilterBar>
 
+        <InvoiceTabs list={list} />
+
         {list.query.isPending ? (
           <LoadingTable rows={8} columns={6} />
         ) : list.query.isError ? (
-          <ErrorState error={list.query.error} onRetry={() => void list.query.refetch()} />
+          isPermissionError(list.query.error) ? (
+            <PermissionState error={list.query.error} />
+          ) : (
+            <ErrorState error={list.query.error} onRetry={() => void list.query.refetch()} />
+          )
         ) : (
           <>
             <DataTable
