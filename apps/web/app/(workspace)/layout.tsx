@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { usePathname } from 'next/navigation'
 import { AlertTriangle, Loader2 } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
@@ -22,8 +23,12 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
   )
 }
 
+/** Routes that render usefully with no company selected. */
+const COMPANYLESS_ROUTES = new Set(['/feed', '/companies'])
+
 function WorkspaceGate({ children }: { children: React.ReactNode }) {
-  const { loading, error } = useCompany()
+  const pathname = usePathname()
+  const { loading, error, activeCompany, companies } = useCompany()
 
   if (loading) {
     return (
@@ -53,6 +58,31 @@ function WorkspaceGate({ children }: { children: React.ReactNode }) {
           <Button className="mt-4" variant="outline" onClick={() => window.location.reload()}>
             Try again
           </Button>
+        </Card>
+      </div>
+    )
+  }
+
+  // Company membership is never forced. The feed and the Business module
+  // stay open so anyone can enter, connect and found a company; every other
+  // company-scoped screen explains itself instead of spinning forever.
+  if ((companies.length === 0 || !activeCompany) && !COMPANYLESS_ROUTES.has(pathname)) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-background p-6">
+        <Card className="max-w-md p-6 text-center">
+          <h1 className="text-base font-semibold">You are not part of a company yet</h1>
+          <p className="mt-1.5 text-sm text-muted-foreground">
+            Not a company owner? No problem — most workspace screens unlock once
+            you belong to a company. Start from the feed or head to Business.
+          </p>
+          <div className="mt-4 flex justify-center gap-2">
+            <Button asChild>
+              <a href="/feed">Go to feed</a>
+            </Button>
+            <Button variant="outline" asChild>
+              <a href="/companies">Go to Business</a>
+            </Button>
+          </div>
         </Card>
       </div>
     )
