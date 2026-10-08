@@ -43,6 +43,9 @@ async def get_me(conn: AsyncConnection, user_id: uuid.UUID) -> dict[str, Any]:
                          AS email_verified, u.first_name, u.last_name, u.phone_e164,
                        u.country_code, u.avatar_url, u.status, u.created_at,
                        u.onboarding_completed_at, u.default_currency, u.default_visibility,
+                       EXISTS (SELECT 1 FROM public.company_memberships m
+                                WHERE m.user_id = u.id AND m.status = 'ACTIVE')
+                         AS has_company,
                        p.headline, p.bio, p.location_city, p.location_country, p.timezone,
                        u.notification_preferences, u.ai_settings, u.privacy_settings,
                        u.security_settings

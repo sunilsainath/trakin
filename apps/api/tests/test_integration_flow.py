@@ -3482,3 +3482,16 @@ async def test_termination_date_defaults_and_validates(conn, skeleton, tenants) 
         )
     ).scalar_one()
     assert str(end) == str(today + timedelta(days=45))
+
+
+# =============================================================================
+# identity surface
+# =============================================================================
+async def test_me_reports_company_membership(conn, tenants) -> None:
+    """GET /users/me tells onboarding whether a company step is needed."""
+    from app.services import identity
+
+    admin = tenants["admin"]
+    me = await identity.get_me(conn, admin.user_id)
+    assert me["has_company"] is True
+    assert me["onboarding_completed"] is False

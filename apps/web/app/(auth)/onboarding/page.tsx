@@ -41,11 +41,38 @@ export default function OnboardingPage() {
   const [w9, setW9] = React.useState<{ public_id: string; name: string } | null>(null)
   const [uploadingW9, setUploadingW9] = React.useState(false)
   const [finishing, setFinishing] = React.useState(false)
+  const [hasCompany, setHasCompany] = React.useState(false)
+  const [createdCompany, setCreatedCompany] = React.useState(false)
+
+  // Returning users predate onboarding or already belong to a company: they
+  // only owe a name, never a second company. A missing session lands on login.
+  React.useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const me = await api.get<{
+          onboarding_completed: boolean
+          has_company: boolean
+        }>('/users/me')
+        if (cancelled) return
+        if (me.onboarding_completed) {
+          router.replace('/feed')
+          return
+        }
+        setHasCompany(me.has_company)
+      } catch {
+        if (!cancelled) router.replace('/login')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [router])
 
   const saveProfile = async (values: { first_name: string; last_name: string }) => {
     setNotice(null)
     await api.patch('/users/me', values)
-    setStep(1)
+    setStep(hasCompany ? 2 : 1)
   }
 
   const uploadW9 = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -84,6 +111,7 @@ export default function OnboardingPage() {
       },
       { idempotencyKey: createIdempotencyKey('company') },
     )
+    setCreatedCompany(true)
     setStep(2)
   }
 
@@ -159,7 +187,9 @@ export default function OnboardingPage() {
         {step === 2 ? (
           <div className="space-y-3 text-center">
             <p className="text-sm text-muted-foreground">
-              Profile saved and company created. You are its super admin.
+              {createdCompany
+                ? 'Profile saved and company created. You are its super admin.'
+                : 'Profile saved. Your workspace is ready.'}
             </p>
             <Button className="w-full" disabled={finishing} onClick={() => void finish()}>
               {finishing ? 'Finishing…' : 'Enter your workspace'}
