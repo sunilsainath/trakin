@@ -32,6 +32,9 @@ CATEGORY_BY_EVENT: dict[str, str] = {
     "CONTRACT_STATUS_CHANGED": "CONTRACT",
     "SOW_STATUS_CHANGED": "SOW",
     "MSA_STATUS_CHANGED": "MSA",
+    "MEMBER_JOINED": "SYSTEM",
+    "ROLE_ASSIGNED": "SECURITY",
+    "DOCUMENT_UPLOADED": "COMPLIANCE",
     "TIMESHEET_SUBMITTED": "TIMESHEET",
     "TIMESHEET_UNDER_REVIEW": "TIMESHEET",
     "TIMESHEET_APPROVED": "TIMESHEET",
@@ -77,6 +80,49 @@ async def handle_event(event: dict[str, Any]) -> None:
             logger.error(
                 "event_handler_failed", handler=name, event_type=event_type, error=str(exc)[:300]
             )
+
+
+async def emit_event(
+    conn: Any,
+    *,
+    event_type: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    company_id: str | uuid.UUID | None = None,
+    payload: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> None:
+    """Write one outbox row from a service, in the caller's transaction.
+
+    The dispatcher delivers it to `handle_event` exactly like a trigger
+    emission. The idempotency key defaults to event + aggregate + type, so a
+    retried request cannot notify twice. Commits with the domain change: no
+    event without the change, no change without the event.
+    """
+    body = dict(payload or {})
+    if company_id is not None:
+        body.setdefault("company_id", str(company_id))
+    await conn.execute(
+        text(
+            """
+            INSERT INTO platform.outbox_events
+              (event_type, event_version, company_id, aggregate_type,
+               aggregate_id, payload, idempotency_key)
+            VALUES (:type, 1, CAST(:cid AS uuid), :atype, :aid,
+                    CAST(:payload AS jsonb), :idem)
+            ON CONFLICT (event_type, idempotency_key)
+              WHERE idempotency_key IS NOT NULL DO NOTHING
+            """
+        ),
+        {
+            "type": event_type,
+            "cid": str(company_id) if company_id is not None else None,
+            "atype": aggregate_type,
+            "aid": aggregate_id,
+            "payload": _json(body),
+            "idem": idempotency_key or f"{event_type}:{aggregate_type}:{aggregate_id}",
+        },
+    )
 
 
 async def notify_participants(event: dict[str, Any]) -> None:
@@ -174,7 +220,7 @@ async def _recipients_for(
                             SELECT id FROM public.company_roles
                              WHERE key IN ('FINANCE_MANAGER', 'ACCOUNTANT', 'SUPER_ADMIN')
                        )
-                    """,
+                    """
                     ),
                     {"id": aggregate_id, "cid": payload.get("company_id")},
                 )
@@ -183,6 +229,115 @@ async def _recipients_for(
             .all()
         )
         return [uuid.UUID(str(r)) for r in rows]
+
+    if aggregate_type in ("msa", "sow", "membership", "document"):
+        return await _business_recipients_for(conn, aggregate_type, aggregate_id, payload)
+
+    return []
+
+
+async def _business_recipients_for(
+    conn: Any, aggregate_type: str, aggregate_id: str, payload: dict[str, Any]
+) -> list[uuid.UUID]:
+    """Recipients for company-formation events: admins of the companies
+    involved, plus the directly affected member where there is one."""
+    if aggregate_type == "msa":
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        """
+                    SELECT DISTINCT m.user_id
+                      FROM public.company_memberships m
+                      JOIN public.company_roles r ON r.id = m.role_id
+                     WHERE m.status = 'ACTIVE'
+                       AND r.key IN ('SUPER_ADMIN', 'COMPANY_ADMIN')
+                       AND (m.company_id = CAST(:a AS uuid)
+                            OR m.company_id = CAST(:b AS uuid))
+                    """
+                    ),
+                    {"a": payload.get("company_a_id"), "b": payload.get("company_b_id")},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [uuid.UUID(str(r)) for r in rows if r]
+
+    if aggregate_type == "sow":
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        """
+                    SELECT DISTINCT m.user_id
+                      FROM public.company_memberships m
+                      JOIN public.company_roles r ON r.id = m.role_id
+                      JOIN public.sows s ON s.company_id = m.company_id
+                                          OR s.counterparty_company_id = m.company_id
+                     WHERE s.id = CAST(:id AS uuid)
+                       AND m.status = 'ACTIVE'
+                       AND r.key IN ('SUPER_ADMIN', 'COMPANY_ADMIN', 'CONTRACT_MANAGER')
+                    UNION
+                    SELECT s.counterparty_user_id
+                      FROM public.sows s
+                     WHERE s.id = CAST(:id AS uuid)
+                       AND s.counterparty_user_id IS NOT NULL
+                    """
+                    ),
+                    {"id": aggregate_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [uuid.UUID(str(r)) for r in rows if r]
+
+    if aggregate_type == "membership":
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        """
+                    SELECT DISTINCT m.user_id
+                      FROM public.company_memberships m
+                      JOIN public.company_roles r ON r.id = m.role_id
+                     WHERE m.company_id = CAST(:cid AS uuid)
+                       AND m.status = 'ACTIVE'
+                       AND r.key IN ('SUPER_ADMIN', 'COMPANY_ADMIN')
+                    UNION
+                    SELECT CAST(:member AS uuid) WHERE :member IS NOT NULL
+                    """
+                    ),
+                    {"cid": payload.get("company_id"), "member": payload.get("user_id")},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [uuid.UUID(str(r)) for r in rows if r]
+
+    if aggregate_type == "document":
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        """
+                    SELECT DISTINCT m.user_id
+                      FROM public.company_memberships m
+                      JOIN public.company_roles r ON r.id = m.role_id
+                     WHERE m.company_id = CAST(:cid AS uuid)
+                       AND m.status = 'ACTIVE'
+                       AND r.key IN ('SUPER_ADMIN', 'COMPANY_ADMIN', 'DOCUMENT_MANAGER')
+                    """
+                    ),
+                    {"cid": payload.get("company_id")},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [uuid.UUID(str(r)) for r in rows if r]
 
     return []
 
@@ -205,7 +360,28 @@ async def _insert_notifications(
     company_id = payload.get("company_id")
     public_id = payload.get("public_id")
 
+    category = CATEGORY_BY_EVENT.get(event_type)
+    if category is None:
+        return
+
     recipients = await _recipients_for(conn, aggregate_type, aggregate_id, payload)
+    if not recipients:
+        return
+
+    # A muted category stays muted: only users who left in-app delivery on
+    # (or never set a preference) are notified.
+    muted = set(
+        (
+            await conn.execute(
+                text(
+                    "SELECT user_id FROM platform.notification_preferences "
+                    "WHERE user_id = ANY(:uids) AND category = :category AND in_app = false"
+                ),
+                {"uids": recipients, "category": category},
+            )
+        ).scalars()
+    )
+    recipients = [user_id for user_id in recipients if user_id not in muted]
     if not recipients:
         return
 
@@ -371,6 +547,22 @@ def _render(event_type: str, payload: dict[str, Any]) -> tuple[str | None, str |
         ),
         "MSA_STATUS_CHANGED": (
             f"Master Service Agreement {public_id} is now {new}",
+            None,
+            "INFO",
+        ),
+        "MEMBER_JOINED": (
+            f"{payload.get('member_email', 'A new member')} joined "
+            f"{payload.get('company_name', 'your company')}",
+            None,
+            "INFO",
+        ),
+        "ROLE_ASSIGNED": (
+            "Your company role was changed",
+            f"Your new role: {payload.get('role_key')}" if payload.get("role_key") else None,
+            "INFO",
+        ),
+        "DOCUMENT_UPLOADED": (
+            f"Document {public_id} was uploaded" if public_id else "A document was uploaded",
             None,
             "INFO",
         ),

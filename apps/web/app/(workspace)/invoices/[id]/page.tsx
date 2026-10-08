@@ -161,7 +161,7 @@ export default function InvoiceDetailPage() {
                 <RecordPaymentDialog invoice={data} />
               ) : null}
 
-              {allowed.has('SUBMITTED') && can('invoices.submit') ? (
+              {allowed.has('SUBMITTED') && can('invoices.submit') && !data.msa_required ? (
                 <Button size="sm" variant="outline" onClick={() => setAction('submit')}>
                   <ListChecks aria-hidden />
                   Submit
@@ -210,7 +210,7 @@ export default function InvoiceDetailPage() {
             <div>
               <p className="font-medium">
                 An active master service agreement is required before this invoice can
-                be approved or sent.
+                leave draft. It stays here until an agreement is active.
               </p>
               {data.msa_block_reason ? (
                 <p className="mt-0.5 text-muted-foreground">{data.msa_block_reason}</p>

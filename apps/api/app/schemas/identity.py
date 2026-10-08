@@ -77,6 +77,19 @@ class UpdateMeRequest(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
     default_currency: str | None = Field(default=None, min_length=3, max_length=3)
     default_visibility: Literal["PUBLIC", "CONNECTIONS", "PRIVATE"] | None = None
+    years_experience: float | None = Field(default=None, ge=0, le=80)
+    availability_status: str | None = Field(default=None, max_length=64)
+    visa_status: (
+        Literal[
+            "CITIZEN",
+            "PERMANENT_RESIDENT",
+            "WORK_VISA",
+            "STUDENT_VISA",
+            "OTHER",
+            "PREFER_NOT_TO_SAY",
+        ]
+        | None
+    ) = None
 
     @field_validator("default_currency")
     @classmethod

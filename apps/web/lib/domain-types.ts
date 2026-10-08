@@ -294,6 +294,16 @@ export interface Contract {
   parties: Record<string, unknown>[]
   line_items: Record<string, unknown>[]
   approval_steps: ContractApprovalStep[]
+  /** Ordered timesheet approvers; materialised into approvals on submit. */
+  timesheet_approval_chain: {
+    steps: {
+      user_id: string | null
+      user_public_id: string | null
+      company_id: string
+      required_permission: string
+      due_within_days: number
+    }[]
+  } | null
   invoiced_total: string
   outstanding_total: string
   invoice_count: number

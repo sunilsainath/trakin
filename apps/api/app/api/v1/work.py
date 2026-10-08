@@ -6,11 +6,12 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.api.deps import RequestContext, company_scope, require_permission
 from app.core.logging import get_logger
+from app.core.rate_limit import rate_limited
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
 from app.schemas.work import (
     AssignmentResponse,
@@ -275,6 +276,70 @@ async def add_timesheet_entry(
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
         payload=payload.model_dump(),
+    )
+
+
+@router.post(
+    "/timesheets/{timesheet_id}/entries/parse",
+    response_model=dict[str, Any],
+    summary="Map an uploaded timesheet file to draft rows",
+    dependencies=[Depends(rate_limited("upload"))],
+)
+async def parse_timesheet_file(
+    ctx_and_conn: TimesheetsOwn,
+    timesheet_id: str,
+    file: Annotated[UploadFile, File(description="Timesheet in CSV or XLSX")],
+) -> dict[str, Any]:
+    """Upload phase of file import. Nothing is written: each row comes back
+    with per-row issues (bad date, bad hours, outside the sheet period) for
+    the review screen. Only CSV and XLSX can be mapped; anything else is
+    refused rather than guessed at."""
+    from app.core.config import get_settings
+    from app.services import timesheet_import as import_service
+
+    ctx, conn = ctx_and_conn
+    content = await file.read()
+    if len(content) > get_settings().max_upload_bytes:
+        from app.core.errors import FileTooLargeError
+
+        raise FileTooLargeError("The file is too large to import.")
+    return await import_service.preview_import(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=timesheet_id,
+        actor_user_id=ctx.user_id,
+        content=content,
+        filename=file.filename or "timesheet.csv",
+    )
+
+
+@router.post(
+    "/timesheets/{timesheet_id}/entries/bulk",
+    response_model=TimesheetResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record reviewed import rows",
+)
+async def bulk_timesheet_entries(
+    ctx_and_conn: TimesheetsOwn, timesheet_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Confirm phase of file import. Every row is validated first: one bad
+    row refuses the whole file rather than importing half of it."""
+    from app.services import timesheet_import as import_service
+
+    ctx, conn = ctx_and_conn
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        from app.core.errors import ValidationError
+
+        raise ValidationError("A list of entries is required.", details={"field": "entries"})
+    return await import_service.bulk_add_entries(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=timesheet_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        entries=entries,
     )
 
 

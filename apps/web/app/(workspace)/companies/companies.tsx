@@ -482,7 +482,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
             intake={intake}
           />
         ) : (
-        <form id="create-company" onSubmit={submit} className="space-y-4">
+        <form id="create-company" onSubmit={submit} className="max-h-[65vh] space-y-4 overflow-y-auto pr-1">
           <Field
             label="Founding W-9"
             error={w9Error ?? undefined}
@@ -515,7 +515,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
             ) : null}
           </Field>
 
-          <Field label="Legal name" error={errors.legal_name ?? fieldErrors.legal_name} required>
+          <Field label="Legal name" htmlFor="company-legal-name" error={errors.legal_name ?? fieldErrors.legal_name} required>
             <Input
               id="company-legal-name"
               value={values.legal_name}
@@ -524,7 +524,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
             />
           </Field>
 
-          <Field label="Display name" error={errors.display_name} required>
+          <Field label="Display name" htmlFor="company-display-name" error={errors.display_name} required>
             <Input
               id="company-display-name"
               value={values.display_name}
@@ -534,7 +534,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
           </Field>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Tax classification (Line 3a)" error={fieldErrors.tax_classification} required>
+            <Field label="Tax classification (Line 3a)" htmlFor="company-tax-classification" error={fieldErrors.tax_classification} required>
               <Select
                 id="company-tax-classification"
                 value={values.tax_classification}
@@ -549,7 +549,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
                 ))}
               </Select>
             </Field>
-            <Field label="TIN type (Part I)" error={fieldErrors.tin_type} required>
+            <Field label="TIN type (Part I)" htmlFor="company-tin-type" error={fieldErrors.tin_type} required>
               <Select
                 id="company-tin-type"
                 value={values.tin_type}
@@ -581,7 +581,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
                 placeholder="4821"
               />
             </Field>
-            <Field label="Street address (Line 5)" error={fieldErrors.address_line1} required>
+            <Field label="Street address (Line 5)" htmlFor="company-address" error={fieldErrors.address_line1} required>
               <Input
                 id="company-address"
                 value={values.address_line1}
@@ -589,7 +589,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
                 aria-invalid={Boolean(fieldErrors.address_line1)}
               />
             </Field>
-            <Field label="Country code" error={errors.country_code} required hint="Two-letter ISO code">
+            <Field label="Country code" htmlFor="company-country" error={errors.country_code} required hint="Two-letter ISO code">
               <Input
                 id="company-country"
                 value={values.country_code}
@@ -598,14 +598,14 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
                 className="font-mono"
               />
             </Field>
-            <Field label="Default currency" error={errors.default_currency} required>
+            <Field label="Default currency" htmlFor="company-currency" error={errors.default_currency} required>
               <CurrencySelect
                 id="company-currency"
                 value={values.default_currency}
                 onChange={(value) => set('default_currency', value)}
               />
             </Field>
-            <Field label="City (Line 6)" error={fieldErrors.city} required>
+            <Field label="City (Line 6)" htmlFor="company-city" error={fieldErrors.city} required>
               <Input
                 id="company-city"
                 value={values.city}
@@ -613,7 +613,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
                 aria-invalid={Boolean(fieldErrors.city)}
               />
             </Field>
-            <Field label="Region or state (Line 6)" error={fieldErrors.region} required>
+            <Field label="Region or state (Line 6)" htmlFor="company-region" error={fieldErrors.region} required>
               <Input
                 id="company-region"
                 value={values.region}
@@ -621,7 +621,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
                 aria-invalid={Boolean(fieldErrors.region)}
               />
             </Field>
-            <Field label="ZIP (Line 6)" error={fieldErrors.postal_code} required>
+            <Field label="ZIP (Line 6)" htmlFor="company-postal" error={fieldErrors.postal_code} required>
               <Input
                 id="company-postal"
                 value={values.postal_code}

@@ -265,6 +265,7 @@ async def list_invoices(
     conn: AsyncConnection,
     *,
     company_id: uuid.UUID,
+    direction: str = "RECEIVABLE",
     status: str | None = None,
     statuses: list[str] | None = None,
     project_public_id: str | None = None,
@@ -277,8 +278,12 @@ async def list_invoices(
     limit: int,
     cursor_keys: dict[str, str],
 ) -> list[dict[str, Any]]:
-    where = ["i.company_id = :cid", "i.deleted_at IS NULL", "i.direction = 'RECEIVABLE'"]
-    params: dict[str, Any] = {"cid": company_id, "limit": limit + 1}
+    if direction not in ("RECEIVABLE", "PAYABLE"):
+        raise ValidationError(
+            "Direction must be RECEIVABLE or PAYABLE.", details={"field": "direction"}
+        )
+    where = ["i.company_id = :cid", "i.deleted_at IS NULL", "i.direction = :direction"]
+    params: dict[str, Any] = {"cid": company_id, "direction": direction, "limit": limit + 1}
 
     if status:
         where.append("i.status = :status")
@@ -716,6 +721,182 @@ async def generate_invoice(
     return await get_invoice(conn, company_id=company_id, public_id=str(row["public_id"]))
 
 
+async def create_vendor_bill(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Record a vendor bill: money this company owes (PAYABLE).
+
+    Unlike engine generation (which prices approved timesheets into
+    RECEIVABLE invoices), a vendor bill is entered from the vendor's own
+    paperwork: free-form line items under a contract for context. Amounts
+    are still derived server-side by the invoice triggers, never trusted
+    from the request. PAYABLE invoices are exempt from the MSA gate by
+    design (ck_invoice_msa_gate): a company does not need an MSA to owe
+    its vendors.
+    """
+    from app.services.lookup import resolve_company_public_id, resolve_user_public_id
+
+    if not payload.get("contract_id"):
+        raise ValidationError(
+            "A vendor bill belongs to a contract.",
+            details={"field": "contract_id"},
+        )
+    contract = await resolve_scoped(conn, "contracts", payload["contract_id"], company_id)
+
+    counterparty_company = (
+        await resolve_company_public_id(conn, payload["counterparty_company_id"])
+        if payload.get("counterparty_company_id")
+        else None
+    )
+    counterparty_user = (
+        await resolve_user_public_id(conn, payload["counterparty_user_id"])
+        if payload.get("counterparty_user_id")
+        else None
+    )
+    if bool(counterparty_company) == bool(counterparty_user):
+        raise ValidationError(
+            "Name the vendor as a company or as a user, not both and not neither.",
+            details={"reason": "COUNTERPARTY_REQUIRED"},
+        )
+
+    items = payload.get("items") or []
+    if not items:
+        raise ValidationError(
+            "A vendor bill needs at least one line item.",
+            details={"reason": "ITEMS_REQUIRED"},
+        )
+    if len(items) > 200:
+        raise ValidationError(
+            "A vendor bill holds at most 200 line items.",
+            details={"reason": "TOO_MANY_ITEMS"},
+        )
+
+    issue_date = payload.get("issue_date") or utc_today().isoformat()
+    due_date = payload.get("due_date")
+    terms = int(payload.get("payment_terms_days", 30) or 30)
+    if due_date is None:
+        due_date = (date.fromisoformat(str(issue_date)) + timedelta(days=terms)).isoformat()
+
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.invoices
+                      (direction, company_id, counterparty_company_id,
+                       counterparty_user_id, project_id, sow_id, contract_id, status,
+                       period_start, period_end, issue_date, due_date, currency,
+                       payment_terms_days, notes, terms_snapshot, created_by)
+                    VALUES
+                      ('PAYABLE', :cid, :counterparty_company, :counterparty_user,
+                       :pid, :sid, :contract, 'DRAFT',
+                       :issue, :issue, :issue, :due, :currency,
+                       :terms, :notes, CAST(:snapshot AS jsonb), :actor)
+                    RETURNING public_id
+                    """
+                ),
+                {
+                    "cid": company_id,
+                    "counterparty_company": counterparty_company,
+                    "counterparty_user": counterparty_user,
+                    "pid": contract["project_id"],
+                    "sid": contract["sow_id"],
+                    "contract": contract["id"],
+                    "issue": issue_date,
+                    "due": due_date,
+                    "currency": payload.get("currency", "USD"),
+                    "terms": terms,
+                    "notes": payload.get("notes"),
+                    "snapshot": _json({"source": "vendor_bill"}),
+                    "actor": actor_user_id,
+                },
+            )
+        )
+        .mappings()
+        .first()
+    )
+    invoice = await resolve_scoped(conn, "invoices", str(row["public_id"]), company_id)
+
+    for position, item in enumerate(items):
+        description = str(item.get("description") or "").strip()
+        if not description:
+            raise ValidationError(
+                f"Line {position + 1} needs a description.",
+                details={"reason": "ITEM_DESCRIPTION_REQUIRED", "position": position},
+            )
+        line_type = str(item.get("line_type") or "FIXED").upper()
+        if line_type not in (
+            "FIXED",
+            "RECURRING",
+            "USAGE",
+            "MILESTONE",
+            "TIMESHEET",
+            "VARIABLE",
+            "ADDITIONAL",
+        ):
+            raise ValidationError(
+                f"Line {position + 1} has an unknown line type.",
+                details={"reason": "ITEM_TYPE_UNKNOWN", "position": position},
+            )
+        quantity = as_decimal(item.get("quantity", 1))
+        unit_rate = as_decimal(item.get("unit_rate", 0))
+        if quantity <= 0 or unit_rate < 0:
+            raise ValidationError(
+                f"Line {position + 1} has an impossible quantity or rate.",
+                details={"reason": "ITEM_AMOUNT_INVALID", "position": position},
+            )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO public.invoice_items
+                  (invoice_id, contract_id, project_id, line_type, description,
+                   quantity, unit, unit_rate, tax_rate, currency,
+                   service_period_start, service_period_end)
+                VALUES
+                  (:invoice, :contract, :project, :line_type, :description,
+                   :quantity, :unit, :unit_rate, :tax_rate, :currency,
+                   :period, :period)
+                """
+            ),
+            {
+                "invoice": invoice["id"],
+                "contract": contract["id"],
+                "project": contract["project_id"],
+                "line_type": line_type,
+                "description": description[:2000],
+                "quantity": quantity,
+                "unit": str(item.get("unit") or "UNIT"),
+                "unit_rate": unit_rate,
+                "tax_rate": as_decimal(item.get("tax_rate", 0)),
+                "currency": payload.get("currency", "USD"),
+                "period": issue_date,
+            },
+        )
+
+    await audit.record(
+        conn,
+        action="invoice.vendor_bill_created",
+        resource_type="invoice",
+        resource_public_id=str(row["public_id"]),
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        new_values={
+            "direction": "PAYABLE",
+            "contract_id": payload["contract_id"],
+            "item_count": len(items),
+        },
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await get_invoice(conn, company_id=company_id, public_id=str(row["public_id"]))
+
+
 async def _contract_role_id(
     conn: AsyncConnection, *, contract_id: uuid.UUID, role_public_id: str | None
 ) -> Any:
@@ -861,6 +1042,13 @@ async def submit_for_approval(
         raise BusinessRuleViolationError(
             "An invoice with no value cannot be submitted.",
             details={"reason": "ZERO_VALUE_INVOICE"},
+        )
+    # Without an MSA the invoice stays in Draft: submission is refused here,
+    # not merely at approval, so a No-MSA invoice can never enter the queue.
+    if before["msa_required"]:
+        raise BusinessRuleViolationError(
+            "An active Master Service Agreement is required before this invoice can be submitted.",
+            details={"reason": "MSA_REQUIRED", "detail": before["msa_block_reason"]},
         )
 
     await conn.execute(

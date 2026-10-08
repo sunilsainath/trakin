@@ -18,6 +18,7 @@ import {
   type Contract,
   type Page as PageEnvelope,
   type Sow,
+  type SowRole,
 } from '@/lib/domain-types'
 import { Button, Dialog, EmptyState, Input, Select } from '@/components/ui'
 import { CurrencySelect, DateInput, Field, FieldGrid } from '@/components/forms'
@@ -273,9 +274,16 @@ const contractSchema = z
     title: z.string().trim().min(2, 'Give the contract a title.').max(200),
     contract_type: z.enum(['COMPANY', 'INDIVIDUAL']),
     counterparty_company_id: z.string().trim().optional(),
+    counterparty_user_id: z.string().trim().optional(),
     currency: z.string().length(3),
     billing_basis: z.enum(['TIMESHEET', 'FIXED', 'RECURRING', 'USAGE', 'MILESTONE']),
     billing_frequency: z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'CUSTOM']),
+    payment_terms_days: z.coerce.number().int().min(0).max(365),
+    contract_value: z.string().trim().optional(),
+    requires_timesheets: z.boolean(),
+    governing_law: z.string().trim().max(200).optional(),
+    confidentiality_level: z.enum(['STANDARD', 'CONFIDENTIAL', 'RESTRICTED']),
+    document_id: z.string().trim().optional(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
   })
@@ -291,12 +299,33 @@ const EMPTY_CONTRACT: ContractFormValues = {
   title: '',
   contract_type: 'COMPANY',
   counterparty_company_id: '',
+  counterparty_user_id: '',
   currency: 'USD',
   billing_basis: 'TIMESHEET',
   billing_frequency: 'MONTHLY',
+  payment_terms_days: 30,
+  contract_value: '',
+  requires_timesheets: true,
+  governing_law: '',
+  confidentiality_level: 'STANDARD',
+  document_id: '',
   start_date: '',
   end_date: '',
 }
+
+interface ContractRoleRow {
+  project_role_id: string
+  quantity: number
+}
+
+interface ContractLineRow {
+  label: string
+  line_type: string
+  quantity: string
+  unit_rate: string
+}
+
+const LINE_TYPES = ['FIXED', 'RECURRING', 'USAGE', 'MILESTONE', 'TIMESHEET', 'VARIABLE', 'ADDITIONAL']
 
 function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?: string }) {
   const router = useRouter()
@@ -305,22 +334,54 @@ function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?
   const [values, setValues] = React.useState<ContractFormValues>(EMPTY_CONTRACT)
   const [errors, setErrors] = React.useState<Partial<Record<string, string>>>({})
   const [sows, setSows] = React.useState<Sow[]>([])
+  const [sowRoles, setSowRoles] = React.useState<SowRole[]>([])
+  const [roleRows, setRoleRows] = React.useState<ContractRoleRow[]>([])
+  const [lineRows, setLineRows] = React.useState<ContractLineRow[]>([])
 
   React.useEffect(() => {
     if (!open) return
     setValues(EMPTY_CONTRACT)
     setErrors({})
+    setSowRoles([])
+    setRoleRows([])
+    setLineRows([])
     void api
       .get<PageEnvelope<Sow>>('/sows?limit=100', { companyPublicId: activeCompanyPublicId })
       .then((page) => setSows(page.data ?? []))
       .catch(() => setSows([]))
   }, [open, activeCompanyPublicId])
 
-  const create = useCompanyMutation<Contract, ContractFormValues>({
+  const loadSowRoles = React.useCallback(
+    (sowId: string) => {
+      if (!sowId) {
+        setSowRoles([])
+        return
+      }
+      void api
+        .get<Sow>(`/sows/${encodeURIComponent(sowId)}`, {
+          companyPublicId: activeCompanyPublicId,
+        })
+        .then((sow) => setSowRoles(sow.roles ?? []))
+        .catch(() => setSowRoles([]))
+    },
+    [activeCompanyPublicId],
+  )
+
+  React.useEffect(() => {
+    if (open) loadSowRoles(values.sow_id)
+  }, [open, values.sow_id, loadSowRoles])
+
+  const create = useCompanyMutation<Contract, ContractFormValues & { roles: ContractRoleRow[]; line_items: ContractLineRow[] }>({
     context: { companyPublicId: activeCompanyPublicId },
     mutationFn: (form) => {
       const sow = sows.find((s) => s.public_id === form.sow_id)
       if (!sow) throw new Error('Choose a SOW first.')
+      const amount = (raw: string | undefined) => {
+        const trimmed = (raw ?? '').trim()
+        if (!trimmed) return undefined
+        const parsed = Number(trimmed)
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined
+      }
       return api.post<Contract>(
         '/contracts',
         {
@@ -329,9 +390,29 @@ function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?
           title: form.title,
           contract_type: form.contract_type,
           counterparty_company_id: form.counterparty_company_id?.trim() || undefined,
+          counterparty_user_id: form.counterparty_user_id?.trim() || undefined,
           currency: form.currency,
           billing_basis: form.billing_basis,
           billing_frequency: form.billing_frequency,
+          payment_terms_days: form.payment_terms_days,
+          contract_value: amount(form.contract_value),
+          requires_timesheets: form.requires_timesheets,
+          governing_law: form.governing_law?.trim() || undefined,
+          confidentiality_level: form.confidentiality_level,
+          document_id: form.document_id?.trim() || undefined,
+          roles: form.roles.map((row) => ({
+            project_role_id: row.project_role_id,
+            quantity: row.quantity,
+          })),
+          line_items: form.line_items
+            .filter((row) => row.label.trim())
+            .map((row, index) => ({
+              label: row.label.trim(),
+              line_type: row.line_type,
+              quantity: amount(row.quantity) ?? 1,
+              unit_rate: amount(row.unit_rate) ?? 0,
+              sort_order: index,
+            })),
           start_date: form.start_date || undefined,
           end_date: form.end_date || undefined,
         },
@@ -363,7 +444,7 @@ function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?
     }
     setErrors({})
     try {
-      await create.mutateAsync(parsed.data)
+      await create.mutateAsync({ ...parsed.data, roles: roleRows, line_items: lineRows })
     } catch (cause) {
       notifyError(cause, 'The contract could not be created.')
     }
@@ -410,7 +491,10 @@ function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?
             <Select
               id="contract-sow"
               value={values.sow_id}
-              onChange={(event) => set('sow_id', event.target.value)}
+              onChange={(event) => {
+                set('sow_id', event.target.value)
+                setRoleRows([])
+              }}
               aria-invalid={Boolean(errors.sow_id)}
             >
               <option value="">Choose a SOW…</option>
@@ -437,23 +521,199 @@ function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?
               <Select
                 id="contract-type"
                 value={values.contract_type}
-                onChange={(event) =>
-                  set('contract_type', event.target.value as ContractFormValues['contract_type'])
-                }
+                onChange={(event) => {
+                  const next = event.target.value as ContractFormValues['contract_type']
+                  setValues((previous) => ({
+                    ...previous,
+                    contract_type: next,
+                    counterparty_company_id:
+                      next === 'COMPANY' ? previous.counterparty_company_id : '',
+                    counterparty_user_id:
+                      next === 'INDIVIDUAL' ? previous.counterparty_user_id : '',
+                  }))
+                }}
               >
                 <option value="COMPANY">Company</option>
                 <option value="INDIVIDUAL">Individual</option>
               </Select>
             </Field>
-            <Field label="Counterparty company ID" error={errors.counterparty_company_id}>
-              <Input
-                id="contract-counterparty"
-                value={values.counterparty_company_id ?? ''}
-                onChange={(event) => set('counterparty_company_id', event.target.value)}
-                placeholder="CO… (optional)"
-              />
-            </Field>
+            {values.contract_type === 'INDIVIDUAL' ? (
+              <Field label="Counterparty user ID" hint="The U… identifier of the person">
+                <Input
+                  id="contract-counterparty-user"
+                  value={values.counterparty_user_id ?? ''}
+                  onChange={(event) => set('counterparty_user_id', event.target.value.toUpperCase())}
+                  placeholder="U…"
+                  className="font-mono"
+                />
+              </Field>
+            ) : (
+              <Field label="Counterparty company ID" hint="The CO… identifier, when the other side is a company">
+                <Input
+                  id="contract-counterparty"
+                  value={values.counterparty_company_id ?? ''}
+                  onChange={(event) => set('counterparty_company_id', event.target.value.toUpperCase())}
+                  placeholder="CO… (optional)"
+                  className="font-mono"
+                />
+              </Field>
+            )}
           </FieldGrid>
+
+          <Field label="Roles on this contract" hint="Priced by the SOW. Each role on its own contract is created by accepting the SOW; add more here only to combine roles.">
+            {sowRoles.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {values.sow_id
+                  ? 'The chosen SOW prices no roles — contracts still need at least the commercial terms below.'
+                  : 'Choose a SOW to list the roles it prices.'}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {roleRows.map((row, index) => {
+                  const role = sowRoles.find((candidate) => candidate.project_role_id === row.project_role_id)
+                  return (
+                    <div key={row.project_role_id} className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate text-sm">
+                        {role?.role_title ?? row.project_role_id}
+                      </span>
+                      <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                        Qty
+                        <Input
+                          type="number"
+                          min={1}
+                          value={row.quantity}
+                          onChange={(event) =>
+                            setRoleRows((previous) =>
+                              previous.map((candidate, position) =>
+                                position === index
+                                  ? { ...candidate, quantity: Math.max(1, Number(event.target.value) || 1) }
+                                  : candidate,
+                              ),
+                            )
+                          }
+                          className="w-16"
+                          aria-label={`Quantity for ${role?.role_title ?? row.project_role_id}`}
+                        />
+                      </label>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          setRoleRows((previous) => previous.filter((_, position) => position !== index))
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  )
+                })}
+                <Select
+                  id="contract-add-role"
+                  value=""
+                  onChange={(event) => {
+                    const id = event.target.value
+                    event.target.value = ''
+                    if (!id || roleRows.some((row) => row.project_role_id === id)) return
+                    setRoleRows((previous) => [...previous, { project_role_id: id, quantity: 1 }])
+                  }}
+                  aria-label="Add a SOW role"
+                >
+                  <option value="">Add a role…</option>
+                  {sowRoles
+                    .filter((role) => !roleRows.some((row) => row.project_role_id === role.project_role_id))
+                    .map((role) => (
+                      <option key={role.project_role_id} value={role.project_role_id}>
+                        {role.role_title ?? role.project_role_id} · ×{role.quantity}
+                      </option>
+                    ))}
+                </Select>
+              </div>
+            )}
+          </Field>
+
+          <Field label="Line items" hint="Optional commercial lines beyond role time.">
+            <div className="space-y-2">
+              {lineRows.map((row, index) => (
+                <div key={index} className="grid grid-cols-[1fr_8rem_5rem_6rem_auto] items-center gap-2">
+                  <Input
+                    value={row.label}
+                    onChange={(event) =>
+                      setLineRows((previous) =>
+                        previous.map((candidate, position) =>
+                          position === index ? { ...candidate, label: event.target.value } : candidate,
+                        ),
+                      )
+                    }
+                    placeholder="Label, e.g. Signing bonus"
+                    aria-label={`Line item ${index + 1} label`}
+                  />
+                  <Select
+                    value={row.line_type}
+                    onChange={(event) =>
+                      setLineRows((previous) =>
+                        previous.map((candidate, position) =>
+                          position === index ? { ...candidate, line_type: event.target.value } : candidate,
+                        ),
+                      )
+                    }
+                    aria-label={`Line item ${index + 1} type`}
+                  >
+                    {LINE_TYPES.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </Select>
+                  <Input
+                    value={row.quantity}
+                    onChange={(event) =>
+                      setLineRows((previous) =>
+                        previous.map((candidate, position) =>
+                          position === index ? { ...candidate, quantity: event.target.value } : candidate,
+                        ),
+                      )
+                    }
+                    placeholder="Qty"
+                    aria-label={`Line item ${index + 1} quantity`}
+                  />
+                  <Input
+                    value={row.unit_rate}
+                    onChange={(event) =>
+                      setLineRows((previous) =>
+                        previous.map((candidate, position) =>
+                          position === index ? { ...candidate, unit_rate: event.target.value } : candidate,
+                        ),
+                      )
+                    }
+                    placeholder="Rate"
+                    aria-label={`Line item ${index + 1} rate`}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setLineRows((previous) => previous.filter((_, position) => position !== index))}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setLineRows((previous) => [
+                    ...previous,
+                    { label: '', line_type: 'FIXED', quantity: '1', unit_rate: '0' },
+                  ])
+                }
+              >
+                Add line item
+              </Button>
+            </div>
+          </Field>
 
           <FieldGrid>
             <Field label="Currency">
@@ -493,7 +753,75 @@ function CreateContractDialog({ triggerLabel = 'New contract' }: { triggerLabel?
                 ))}
               </Select>
             </Field>
+            <Field label="Payment terms (days)">
+              <Input
+                id="contract-terms"
+                type="number"
+                min={0}
+                max={365}
+                value={values.payment_terms_days}
+                onChange={(event) => set('payment_terms_days', Number(event.target.value) || 0)}
+              />
+            </Field>
+            <Field label="Contract value" hint="Optional cap">
+              <Input
+                id="contract-value"
+                value={values.contract_value ?? ''}
+                onChange={(event) => set('contract_value', event.target.value)}
+                placeholder="50000.00"
+              />
+            </Field>
+            <Field label="Governing law" hint="Optional">
+              <Input
+                id="contract-law"
+                value={values.governing_law ?? ''}
+                onChange={(event) => set('governing_law', event.target.value)}
+                placeholder="Delaware, USA"
+              />
+            </Field>
+            <Field label="Confidentiality">
+              <Select
+                id="contract-confidentiality"
+                value={values.confidentiality_level}
+                onChange={(event) =>
+                  set(
+                    'confidentiality_level',
+                    event.target.value as ContractFormValues['confidentiality_level'],
+                  )
+                }
+              >
+                {['STANDARD', 'CONFIDENTIAL', 'RESTRICTED'].map((level) => (
+                  <option key={level} value={level}>
+                    {statusLabel(level)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Linked document ID" hint="Optional D… reference">
+              <Input
+                id="contract-document"
+                value={values.document_id ?? ''}
+                onChange={(event) => set('document_id', event.target.value.toUpperCase())}
+                placeholder="D…"
+                className="font-mono"
+              />
+            </Field>
           </FieldGrid>
+
+          <label className="flex cursor-pointer items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={values.requires_timesheets}
+              onChange={(event) => set('requires_timesheets', event.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Timesheets required</span>
+              <span className="block text-xs text-muted-foreground">
+                Work on this contract is billed from approved timesheets.
+              </span>
+            </span>
+          </label>
 
           <FieldGrid>
             <Field label="Start date" error={errors.start_date}>

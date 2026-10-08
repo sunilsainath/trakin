@@ -44,6 +44,7 @@ async def get_me(conn: AsyncConnection, user_id: uuid.UUID) -> dict[str, Any]:
                        u.country_code, u.avatar_url, u.status, u.created_at,
                        u.onboarding_completed_at, u.default_currency, u.default_visibility,
                        p.headline, p.bio, p.location_city, p.location_country, p.timezone,
+                       p.years_experience, p.availability_status, p.visa_status,
                        u.notification_preferences, u.ai_settings, u.privacy_settings,
                        u.security_settings
                   FROM public.users u
@@ -97,7 +98,16 @@ async def update_me(
         "default_currency",
         "default_visibility",
     }
-    profile_fields = {"headline", "bio", "location_city", "location_country", "timezone"}
+    profile_fields = {
+        "headline",
+        "bio",
+        "location_city",
+        "location_country",
+        "timezone",
+        "years_experience",
+        "availability_status",
+        "visa_status",
+    }
 
     user_payload = {k: v for k, v in changes.items() if k in user_fields and v is not None}
     profile_payload = {k: v for k, v in changes.items() if k in profile_fields and v is not None}
@@ -503,3 +513,340 @@ async def set_notification_preferences(
         request_id=request_id,
     )
     return await get_notification_preferences(conn, user_id=user_id)
+
+
+# ------------------------------------------------------------------ career
+def _validate_range(start: Any, end: Any) -> None:
+    """Reject an end date before its start date before the CHECK does."""
+    from app.core.errors import ValidationError
+
+    if start and end and str(end) < str(start):
+        raise ValidationError(
+            "The end date cannot be before the start date.",
+            details={"field": "end_date"},
+        )
+
+
+async def list_education(conn: AsyncConnection, *, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT id::text AS id, institution, degree, field_of_study,
+                           start_date, end_date, grade, description, credential_id,
+                           is_verified, created_at
+                      FROM public.user_educations
+                     WHERE user_id = :uid
+                     ORDER BY COALESCE(end_date, CURRENT_DATE) DESC, created_at DESC
+                    """
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_education(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    payload: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    from app.core.errors import ValidationError
+
+    institution = str(payload.get("institution") or "").strip()
+    if not institution:
+        raise ValidationError("Name the school or institution.", details={"field": "institution"})
+    _validate_range(payload.get("start_date"), payload.get("end_date"))
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.user_educations
+                      (user_id, institution, degree, field_of_study, start_date,
+                       end_date, grade, description, credential_id)
+                    VALUES (:uid, :institution, :degree, :field, :start, :end,
+                            :grade, :description, :credential)
+                    RETURNING id::text AS id
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "institution": institution[:200],
+                    "degree": (str(payload.get("degree") or "").strip() or None),
+                    "field": (str(payload.get("field_of_study") or "").strip() or None),
+                    "start": payload.get("start_date"),
+                    "end": payload.get("end_date"),
+                    "grade": (str(payload.get("grade") or "").strip() or None),
+                    "description": (str(payload.get("description") or "").strip() or None),
+                    "credential": (str(payload.get("credential_id") or "").strip() or None),
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    await audit.record(
+        conn,
+        action="profile.education_added",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values={"institution": institution},
+        request_id=request_id,
+    )
+    return {"id": str(row["id"])}
+
+
+async def remove_education(
+    conn: AsyncConnection, *, user_id: uuid.UUID, education_id: str, request_id: str
+) -> None:
+    deleted = (
+        await conn.execute(
+            text("DELETE FROM public.user_educations WHERE id = :id AND user_id = :uid"),
+            {"id": education_id, "uid": user_id},
+        )
+    ).rowcount
+    if not deleted:
+        raise ResourceNotFoundError("Education entry not found.")
+    await audit.record(
+        conn,
+        action="profile.education_removed",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        request_id=request_id,
+    )
+
+
+async def list_experience(conn: AsyncConnection, *, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT id::text AS id, company_name, title, employment_type,
+                           location, description, start_date, end_date, is_current,
+                           created_at
+                      FROM public.user_experiences
+                     WHERE user_id = :uid
+                     ORDER BY is_current DESC, COALESCE(end_date, CURRENT_DATE) DESC
+                    """
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_experience(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    payload: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    from app.core.errors import ValidationError
+
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise ValidationError("Name the role you held.", details={"field": "title"})
+    employment = str(payload.get("employment_type") or "").strip() or None
+    if employment is not None and employment not in (
+        "FULL_TIME",
+        "PART_TIME",
+        "CONTRACT",
+        "CONSULTANT",
+        "INTERN",
+    ):
+        raise ValidationError(
+            "Employment type must be FULL_TIME, PART_TIME, CONTRACT, CONSULTANT or INTERN.",
+            details={"field": "employment_type"},
+        )
+    _validate_range(payload.get("start_date"), payload.get("end_date"))
+    if not payload.get("start_date"):
+        raise ValidationError("Give the start date of the role.", details={"field": "start_date"})
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.user_experiences
+                      (user_id, company_name, title, employment_type, location,
+                       description, start_date, end_date, is_current)
+                    VALUES (:uid, :company, :title, :employment, :location,
+                            :description, :start, :end, :current)
+                    RETURNING id::text AS id
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "company": (str(payload.get("company_name") or "").strip() or None),
+                    "title": title[:200],
+                    "employment": employment,
+                    "location": (str(payload.get("location") or "").strip() or None),
+                    "description": (str(payload.get("description") or "").strip() or None),
+                    "start": payload.get("start_date"),
+                    "end": payload.get("end_date"),
+                    "current": bool(payload.get("is_current", False)),
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    await audit.record(
+        conn,
+        action="profile.experience_added",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values={"title": title},
+        request_id=request_id,
+    )
+    return {"id": str(row["id"])}
+
+
+async def remove_experience(
+    conn: AsyncConnection, *, user_id: uuid.UUID, experience_id: str, request_id: str
+) -> None:
+    deleted = (
+        await conn.execute(
+            text("DELETE FROM public.user_experiences WHERE id = :id AND user_id = :uid"),
+            {"id": experience_id, "uid": user_id},
+        )
+    ).rowcount
+    if not deleted:
+        raise ResourceNotFoundError("Experience entry not found.")
+    await audit.record(
+        conn,
+        action="profile.experience_removed",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        request_id=request_id,
+    )
+
+
+async def list_skills(conn: AsyncConnection, *, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT s.id::text AS skill_id, s.name, s.slug,
+                           us.proficiency, us.years_experience
+                      FROM public.user_skills us
+                      JOIN public.skills s ON s.id = us.skill_id
+                     WHERE us.user_id = :uid
+                     ORDER BY s.name
+                    """
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def attach_skill(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    payload: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    from app.core.errors import ValidationError
+
+    name = str(payload.get("skill_name") or payload.get("name") or "").strip()
+    if len(name) < 2:
+        raise ValidationError("Name the skill.", details={"field": "skill_name"})
+    try:
+        proficiency = int(payload.get("proficiency", 3))
+    except (TypeError, ValueError):
+        raise ValidationError(
+            "Proficiency is 1 (learning) to 5 (expert).",
+            details={"field": "proficiency"},
+        ) from None
+    if not 1 <= proficiency <= 5:
+        raise ValidationError(
+            "Proficiency is 1 (learning) to 5 (expert).",
+            details={"field": "proficiency"},
+        )
+    # The slug column is GENERATED ALWAYS and derives itself.
+    skill = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.skills (name, category, is_active)
+                    VALUES (:name, 'USER', true)
+                    ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+                    RETURNING id
+                    """
+                ),
+                {"name": name[:200]},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    await conn.execute(
+        text(
+            """
+            INSERT INTO public.user_skills (user_id, skill_id, proficiency, years_experience)
+            VALUES (:uid, :sid, :proficiency, :years)
+            ON CONFLICT (user_id, skill_id) DO UPDATE
+               SET proficiency = EXCLUDED.proficiency,
+                   years_experience = EXCLUDED.years_experience
+            """
+        ),
+        {
+            "uid": user_id,
+            "sid": skill["id"],
+            "proficiency": proficiency,
+            "years": payload.get("years_experience"),
+        },
+    )
+    await audit.record(
+        conn,
+        action="profile.skill_added",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values={"skill": name},
+        request_id=request_id,
+    )
+    return {"skill_id": str(skill["id"]), "name": name}
+
+
+async def detach_skill(
+    conn: AsyncConnection, *, user_id: uuid.UUID, skill_id: str, request_id: str
+) -> None:
+    deleted = (
+        await conn.execute(
+            text("DELETE FROM public.user_skills WHERE user_id = :uid AND skill_id = :sid"),
+            {"uid": user_id, "sid": skill_id},
+        )
+    ).rowcount
+    if not deleted:
+        raise ResourceNotFoundError("Skill not found on this profile.")
+    await audit.record(
+        conn,
+        action="profile.skill_removed",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        request_id=request_id,
+    )

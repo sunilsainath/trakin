@@ -127,6 +127,32 @@ export function SignupForm() {
         onSubmit={onSubmit}
         banner={null}
       />
+      <div className="relative py-1">
+        <div className="absolute inset-0 flex items-center" aria-hidden>
+          <div className="w-full border-t border-border" />
+        </div>
+        <div className="relative flex justify-center text-2xs uppercase tracking-wider text-subtle-foreground">
+          <span className="bg-background px-2">or</span>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          void getSupabase()
+            .auth.signInWithOAuth({
+              provider: 'google',
+              options: { redirectTo: `${window.location.origin}/auth/callback` },
+            })
+            .then(({ error }) => {
+              if (error) {
+                setNotice({ tone: 'danger', text: 'Google sign-up is not available right now.' })
+              }
+            })
+        }}
+        className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-input bg-background text-sm font-medium transition-colors hover:bg-muted"
+      >
+        Continue with Google
+      </button>
       <p className="text-center text-sm text-muted-foreground">
         Already have an account?{' '}
         <a href="/login" className="text-primary hover:underline">

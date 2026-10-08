@@ -34,6 +34,7 @@ apps/web/next-env.d.ts
 # --- testing ---
 playwright-report/
 test-results/
+apps/web/e2e/.auth/
 coverage/
 
 # --- editors / os ---

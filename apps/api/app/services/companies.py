@@ -561,7 +561,8 @@ async def change_member_role(
             await conn.execute(
                 text(
                     """
-                SELECT m.id::text AS id, m.public_id, r.key AS old_role_key
+                SELECT m.id::text AS id, m.public_id, m.user_id::text AS user_id,
+                       r.key AS old_role_key
                   FROM public.company_memberships m
                   JOIN public.company_roles r ON r.id = m.role_id
                  WHERE m.company_id = :cid AND m.public_id = :pid
@@ -607,6 +608,21 @@ async def change_member_role(
         new_values={"role_key": new_role_key},
         reason=reason,
         request_id=request_id,
+    )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="ROLE_ASSIGNED",
+        aggregate_type="membership",
+        aggregate_id=str(member["id"]),
+        company_id=company_id,
+        payload={
+            "company_id": str(company_id),
+            "user_id": str(member["user_id"]),
+            "role_key": new_role_key,
+            "old_role_key": member["old_role_key"],
+        },
     )
     return {"public_id": member_public_id, "role_key": new_role_key}
 
@@ -914,6 +930,39 @@ async def accept_invitation(
         actor_user_id=user_id,
         request_id=request_id,
     )
+
+    membership_id = (
+        (
+            await conn.execute(
+                text(
+                    "SELECT m.id::text AS id, c.display_name AS company_name"
+                    " FROM public.company_memberships m"
+                    " JOIN public.companies c ON c.id = m.company_id"
+                    " WHERE m.company_id = CAST(:cid AS uuid) AND m.user_id = :uid"
+                ),
+                {"cid": row["company_id"], "uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if membership_id is not None:
+        from app.services import events as event_service
+
+        await event_service.emit_event(
+            conn,
+            event_type="MEMBER_JOINED",
+            aggregate_type="membership",
+            aggregate_id=str(membership_id["id"]),
+            company_id=uuid.UUID(str(row["company_id"])),
+            payload={
+                "company_id": str(row["company_id"]),
+                "company_public_id": str(row["company_public_id"]),
+                "company_name": str(membership_id["company_name"]),
+                "user_id": str(user_id),
+                "member_email": str(row["email"]),
+            },
+        )
 
     return {"company_public_id": row["company_public_id"]}
 

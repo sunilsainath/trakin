@@ -560,6 +560,88 @@ def test_feature_flag_bucketing_is_stable() -> None:
     assert 0 <= first < 100
 
 
+# ------------------------------------------------------------------ timesheet import
+def _import_period():
+    import datetime as dt
+
+    return dt.date(2026, 9, 1), dt.date(2026, 9, 30)
+
+
+def test_timesheet_csv_maps_columns_and_flags_bad_rows() -> None:
+    from app.services.timesheet_import import parse_timesheet_file
+
+    content = (
+        b"Date,Hours,Description\n"
+        b"2026-09-03,8,Backend work\n"
+        b"not-a-date,8,Broken row\n"
+        b"2026-09-04,99,Too many hours\n"
+        b"2026-10-01,8,Outside the period\n"
+    )
+    preview = parse_timesheet_file(
+        content, "sheet.csv", period_start=_import_period()[0], period_end=_import_period()[1]
+    )
+    assert preview["row_count"] == 4
+    assert preview["mapped_columns"] == {
+        "date": "Date",
+        "hours": "Hours",
+        "description": "Description",
+    }
+    good, bad_date, bad_hours, outside = preview["rows"]
+    assert good["issues"] == [] and good["hours"] == 8.0
+    assert bad_date["issues"] == ["BAD_DATE"]
+    assert bad_hours["issues"] == ["BAD_HOURS"]
+    assert outside["issues"] == ["OUTSIDE_PERIOD"]
+
+
+def test_timesheet_xlsx_parses_and_computes_hours_from_start_end() -> None:
+    import io
+
+    import openpyxl
+
+    from app.services.timesheet_import import parse_timesheet_file
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Work Date", "Start", "End", "Notes"])
+    sheet.append(["04/09/2026", "09:00", "17:30", "Client work"])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    preview = parse_timesheet_file(
+        buffer.getvalue(),
+        "sheet.xlsx",
+        period_start=_import_period()[0],
+        period_end=_import_period()[1],
+    )
+    assert preview["row_count"] == 1
+    row = preview["rows"][0]
+    assert row["issues"] == [] and row["hours"] == 8.5
+
+
+def test_timesheet_import_refuses_unmappable_files() -> None:
+    import pytest
+
+    from app.core.errors import ValidationError
+    from app.services.timesheet_import import parse_timesheet_file
+
+    with pytest.raises(ValidationError) as exc_info:
+        parse_timesheet_file(
+            b"foo,bar\n1,2\n",
+            "sheet.csv",
+            period_start=_import_period()[0],
+            period_end=_import_period()[1],
+        )
+    assert exc_info.value.details["reason"] == "IMPORT_COLUMNS_UNMAPPED"
+
+    with pytest.raises(ValidationError) as exc_info:
+        parse_timesheet_file(
+            b"%PDF-1.4 fake",
+            "scan.pdf",
+            period_start=_import_period()[0],
+            period_end=_import_period()[1],
+        )
+    assert exc_info.value.details["reason"] == "UNSUPPORTED_IMPORT_FORMAT"
+
+
 # ------------------------------------------------------------------ w9 identity
 def _valid_w9_payload() -> dict:
     return {

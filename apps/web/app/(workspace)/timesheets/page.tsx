@@ -352,10 +352,13 @@ export default function TimesheetsPage() {
         label="What needs to change"
         busy={act.isPending}
         error={act.isError ? act.error : null}
-        onConfirm={() => {
+        onConfirm={(reason) => {
           if (!action) return
           act
-            .mutateAsync({ path: `/timesheet-approvals/${action.id}?decision=REJECTED`, body: {} })
+            .mutateAsync({
+              path: `/timesheet-approvals/${action.id}?decision=REJECTED`,
+              body: { notes: reason },
+            })
             .catch((cause) => notifyError(cause, 'The timesheet could not be returned.'))
         }}
       />
@@ -698,6 +701,13 @@ function TimesheetDialog({
             </form>
           ) : null}
 
+          {data.editable && can('timesheets.create') ? (
+            <ImportEntries
+              timesheetId={timesheetId ?? ''}
+              onImported={() => void sheet.refetch()}
+            />
+          ) : null}
+
           <DataTable
             columns={entryColumns}
             rows={data.entries}
@@ -743,6 +753,263 @@ function Stat({ label, value }: { label: string; value: React.ReactNode }) {
     <div className="rounded-md border border-border p-3">
       <p className="text-2xs font-medium uppercase tracking-wide text-subtle-foreground">{label}</p>
       <div className="mt-1 text-lg font-semibold tabular">{value}</div>
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* File import                                                                */
+/* -------------------------------------------------------------------------- */
+
+interface ImportRow {
+  row_no: number
+  entry_date: string | null
+  hours: number | null
+  work_description: string
+  issues: string[]
+}
+
+interface ImportPreview {
+  filename: string
+  row_count: number
+  mapped_columns: Record<string, string>
+  rows: ImportRow[]
+}
+
+const IMPORT_ISSUE_LABELS: Record<string, string> = {
+  BAD_DATE: 'Date could not be read',
+  BAD_HOURS: 'Hours must be between 0 and 24',
+  OUTSIDE_PERIOD: 'Outside this sheet\u2019s period',
+}
+
+/**
+ * Upload a CSV/XLSX timesheet, review the mapped rows, and confirm.
+ *
+ * Parsing is deterministic header mapping on the server; the screen shows
+ * exactly which columns were mapped and flags every unusable row. Confirm
+ * sends the surviving rows to the bulk endpoint, which re-validates all of
+ * them — one bad row refuses the whole file rather than importing half.
+ */
+function ImportEntries({
+  timesheetId,
+  onImported,
+}: {
+  timesheetId: string
+  onImported: () => void
+}) {
+  const { activeCompanyPublicId } = useCompany()
+  const [preview, setPreview] = React.useState<ImportPreview | null>(null)
+  const [parsing, setParsing] = React.useState(false)
+  const [confirming, setConfirming] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+
+  const parse = async (file: File) => {
+    setParsing(true)
+    setError(null)
+    setPreview(null)
+    try {
+      const { getAccessToken } = await import('@/lib/api')
+      const form = new FormData()
+      form.append('file', file)
+      const headers: Record<string, string> = {}
+      const token = await getAccessToken()
+      if (token) headers.Authorization = `Bearer ${token}`
+      if (activeCompanyPublicId) headers['X-Company-Public-Id'] = activeCompanyPublicId
+      const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000'
+      const response = await fetch(
+        `${base}/api/v1/timesheets/${encodeURIComponent(timesheetId)}/entries/parse`,
+        { method: 'POST', headers, body: form, cache: 'no-store' },
+      )
+      if (!response.ok) {
+        let message = 'That file could not be mapped.'
+        try {
+          const payload = (await response.json()) as {
+            error?: { message?: string; details?: { headers?: string[] } }
+          }
+          message = payload.error?.message ?? message
+          const headers = payload.error?.details?.headers
+          if (headers) message += ` Headers seen: ${headers.join(', ') || '(none)'}.`
+        } catch {
+          // Keep the default message.
+        }
+        throw new Error(message)
+      }
+      setPreview((await response.json()) as ImportPreview)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'That file could not be mapped.')
+    } finally {
+      setParsing(false)
+    }
+  }
+
+  const updateRow = (rowNo: number, patch: Partial<ImportRow>) =>
+    setPreview((previous) =>
+      previous
+        ? {
+            ...previous,
+            rows: previous.rows.map((row) => {
+              if (row.row_no !== rowNo) return row
+              const next = { ...row, ...patch }
+              const issues: string[] = []
+              if (!next.entry_date || Number.isNaN(Date.parse(next.entry_date))) {
+                issues.push('BAD_DATE')
+              }
+              if (next.hours === null || !(next.hours > 0 && next.hours <= 24)) {
+                issues.push('BAD_HOURS')
+              }
+              return { ...next, issues }
+            }),
+          }
+        : previous,
+    )
+
+  const removeRow = (rowNo: number) =>
+    setPreview((previous) =>
+      previous ? { ...previous, rows: previous.rows.filter((row) => row.row_no !== rowNo) } : previous,
+    )
+
+  const issueCount = (preview?.rows ?? []).filter((row) => row.issues.length > 0).length
+
+  const confirm = async () => {
+    if (!preview || issueCount > 0) return
+    setConfirming(true)
+    setError(null)
+    try {
+      await api.post(
+        `/timesheets/${encodeURIComponent(timesheetId)}/entries/bulk`,
+        {
+          entries: preview.rows.map((row) => ({
+            entry_date: row.entry_date,
+            hours: row.hours,
+            work_description: row.work_description,
+          })),
+        },
+        { companyPublicId: activeCompanyPublicId },
+      )
+      notifySuccess('Entries imported.', `${preview.rows.length} rows recorded from ${preview.filename}.`)
+      setPreview(null)
+      onImported()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The rows could not be imported.')
+      notifyError(cause, 'The rows could not be imported.')
+    } finally {
+      setConfirming(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-surface-sunken p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-semibold">Import from file</p>
+        <label className="text-sm">
+          <span className="sr-only">Timesheet file (CSV or XLSX)</span>
+          <input
+            type="file"
+            accept=".csv,.tsv,.txt,.xlsx"
+            disabled={parsing}
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (file) void parse(file)
+            }}
+            className="text-xs"
+          />
+        </label>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        CSV or XLSX with Date, Hours and Description columns. Rows are mapped,
+        shown for review, and only recorded when you confirm. Scanned PDFs and
+        images cannot be mapped without an OCR backend.
+      </p>
+      {parsing ? <p className="text-xs text-muted-foreground">Mapping columns…</p> : null}
+      {error ? (
+        <p role="alert" className="text-xs font-medium text-danger">
+          {error}
+        </p>
+      ) : null}
+
+      {preview ? (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            {preview.filename} · {preview.rows.length} rows · mapped{' '}
+            {Object.entries(preview.mapped_columns)
+              .map(([kind, header]) => `${kind} ← ${header}`)
+              .join(', ')}
+          </p>
+          <ul className="max-h-64 space-y-1.5 overflow-y-auto">
+            {preview.rows.map((row) => (
+              <li
+                key={row.row_no}
+                className="grid grid-cols-[6.5rem_4.5rem_1fr_auto] items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-xs"
+              >
+                <input
+                  type="date"
+                  value={row.entry_date ?? ''}
+                  onChange={(event) => updateRow(row.row_no, { entry_date: event.target.value || null })}
+                  aria-label={`Row ${row.row_no} date`}
+                  className="h-8 rounded border border-input bg-background px-1"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={24}
+                  step={0.25}
+                  value={row.hours ?? ''}
+                  onChange={(event) =>
+                    updateRow(row.row_no, {
+                      hours: event.target.value === '' ? null : Number(event.target.value),
+                    })
+                  }
+                  aria-label={`Row ${row.row_no} hours`}
+                  className="h-8 rounded border border-input bg-background px-1"
+                />
+                <input
+                  value={row.work_description}
+                  onChange={(event) => updateRow(row.row_no, { work_description: event.target.value })}
+                  aria-label={`Row ${row.row_no} description`}
+                  className="h-8 min-w-0 rounded border border-input bg-background px-1"
+                />
+                <span className="flex items-center gap-1">
+                  {row.issues.length > 0 ? (
+                    <Badge tone="danger">
+                      {row.issues.map((issue) => IMPORT_ISSUE_LABELS[issue] ?? issue).join(' · ')}
+                    </Badge>
+                  ) : (
+                    <Badge tone="success">Ready</Badge>
+                  )}
+                  <Button type="button" variant="ghost" size="sm" onClick={() => removeRow(row.row_no)}>
+                    Remove
+                  </Button>
+                </span>
+              </li>
+            ))}
+          </ul>
+          {preview.rows.length === 0 ? (
+            <p className="text-xs text-muted-foreground">Every row was removed — nothing to import.</p>
+          ) : null}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              {issueCount === 0
+                ? 'Every row is valid.'
+                : `${issueCount} row${issueCount === 1 ? '' : 's'} need${issueCount === 1 ? 's' : ''} attention before confirming.`}
+            </p>
+            <div className="flex gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={() => setPreview(null)}>
+                Discard
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={issueCount > 0 || preview.rows.length === 0}
+                loading={confirming}
+                onClick={() => void confirm()}
+              >
+                Confirm {preview.rows.length} rows
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

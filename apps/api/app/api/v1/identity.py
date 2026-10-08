@@ -139,6 +139,80 @@ async def set_my_notification_preferences(
     )
 
 
+# ------------------------------------------------------------------ career
+# NOTE: every /me/* route lives above /{public_id}: "me" would otherwise
+# match the public-id catch-all below it.
+@router.get("/me/education", summary="My education history")
+async def list_my_education(ctx_and_conn: UserContext) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await identity.list_education(conn, user_id=ctx.user_id)
+
+
+@router.post("/me/education", summary="Add an education entry")
+async def add_my_education(ctx_and_conn: UserContext, payload: dict[str, Any]) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.add_education(
+        conn, user_id=ctx.user_id, payload=payload, request_id=ctx.request_id
+    )
+
+
+@router.delete("/me/education/{education_id}", summary="Remove an education entry")
+async def remove_my_education(ctx_and_conn: UserContext, education_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    await identity.remove_education(
+        conn, user_id=ctx.user_id, education_id=education_id, request_id=ctx.request_id
+    )
+    return {"ok": True, "request_id": ctx.request_id}
+
+
+@router.get("/me/experience", summary="My career history")
+async def list_my_experience(ctx_and_conn: UserContext) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await identity.list_experience(conn, user_id=ctx.user_id)
+
+
+@router.post("/me/experience", summary="Add a career entry")
+async def add_my_experience(ctx_and_conn: UserContext, payload: dict[str, Any]) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.add_experience(
+        conn, user_id=ctx.user_id, payload=payload, request_id=ctx.request_id
+    )
+
+
+@router.delete("/me/experience/{experience_id}", summary="Remove a career entry")
+async def remove_my_experience(ctx_and_conn: UserContext, experience_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    await identity.remove_experience(
+        conn, user_id=ctx.user_id, experience_id=experience_id, request_id=ctx.request_id
+    )
+    return {"ok": True, "request_id": ctx.request_id}
+
+
+@router.get("/me/skills", summary="My skills")
+async def list_my_skills(ctx_and_conn: UserContext) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await identity.list_skills(conn, user_id=ctx.user_id)
+
+
+@router.post("/me/skills", summary="Attach a skill to my profile")
+async def attach_my_skill(ctx_and_conn: UserContext, payload: dict[str, Any]) -> dict[str, Any]:
+    """Names a skill from the catalogue, creating the catalogue row when the
+    platform has never seen it. Proficiency is 1 (learning) to 5 (expert)."""
+    ctx, conn = ctx_and_conn
+    return await identity.attach_skill(
+        conn, user_id=ctx.user_id, payload=payload, request_id=ctx.request_id
+    )
+
+
+@router.delete("/me/skills/{skill_id}", summary="Remove a skill from my profile")
+async def detach_my_skill(ctx_and_conn: UserContext, skill_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    await identity.detach_skill(
+        conn, user_id=ctx.user_id, skill_id=skill_id, request_id=ctx.request_id
+    )
+    return {"ok": True, "request_id": ctx.request_id}
+
+
 @router.get(
     "/{public_id}",
     response_model=UserProfileResponse,

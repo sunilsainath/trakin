@@ -60,6 +60,9 @@ export interface Me {
   timezone: string
   status: string
   onboarding_completed: boolean
+  years_experience: number | null
+  availability_status: string | null
+  visa_status: string | null
   created_at: string
   settings: {
     notifications: Record<string, { in_app: boolean; email: boolean; push: boolean }>

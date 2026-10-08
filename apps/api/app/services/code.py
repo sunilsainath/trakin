@@ -1444,6 +1444,21 @@ async def transition_sow(
         request_id=request_id,
         ip_address=ip_address,
     )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="SOW_STATUS_CHANGED",
+        aggregate_type="sow",
+        aggregate_id=str(before["id"]),
+        company_id=company_id,
+        payload={
+            "company_id": str(company_id),
+            "public_id": public_id,
+            "old": current,
+            "new": target,
+        },
+    )
     return await get_sow(conn, company_id=company_id, public_id=public_id, with_history=True)
 
 
@@ -2187,6 +2202,21 @@ async def accept_sow(
         request_id=request_id,
         ip_address=ip_address,
     )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="SOW_STATUS_CHANGED",
+        aggregate_type="sow",
+        aggregate_id=str(before["id"]),
+        company_id=company_id,
+        payload={
+            "company_id": str(company_id) if company_id else None,
+            "public_id": public_id,
+            "old": current,
+            "new": "ACTIVE",
+        },
+    )
     if before["company_id"] is None:
         # §17: an accepted individual SOW automatically gains its engagement
         # contract, so it can never be an orphan that cannot become executable.
@@ -2205,6 +2235,28 @@ async def accept_sow(
                 sow_public_id=public_id,
                 owner_user_id=uuid.UUID(str(before["created_by"])),
                 request_id=request_id,
+            )
+    else:
+        # Company SOWs with auto-generation gain one DRAFT contract per SOW
+        # role ("one role = one contract"). Draft, not active: commercial
+        # terms still go through send/accept. Re-acceptance after a reopen
+        # skips roles that already have a contract.
+        auto = (
+            await conn.execute(
+                text("SELECT auto_generate_contracts FROM public.sows WHERE id = :sid"),
+                {"sid": before["id"]},
+            )
+        ).scalar()
+        if auto:
+            from app.services import contracts as contract_service
+
+            await contract_service.generate_contracts_from_sow(
+                conn,
+                company_id=uuid.UUID(str(before["company_id"])),
+                sow_public_id=public_id,
+                actor_user_id=actor_user_id,
+                request_id=request_id,
+                ip_address=ip_address,
             )
     return await _get_sow_after_decision(conn, public_id=public_id)
 
@@ -2255,6 +2307,21 @@ async def reject_sow(
         reason=reason.strip(),
         request_id=request_id,
         ip_address=ip_address,
+    )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="SOW_STATUS_CHANGED",
+        aggregate_type="sow",
+        aggregate_id=str(before["id"]),
+        company_id=company_id,
+        payload={
+            "company_id": str(company_id) if company_id else None,
+            "public_id": public_id,
+            "old": current,
+            "new": "REJECTED",
+        },
     )
     return await _get_sow_after_decision(conn, public_id=public_id)
 

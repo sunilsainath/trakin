@@ -113,6 +113,7 @@ def _cursor(raw: str | None) -> dict[str, str]:
 @router.get("/invoices", response_model=Page[InvoiceResponse], summary="List invoices")
 async def list_invoices(
     ctx_and_conn: InvoicesRead,
+    direction: str = Query("RECEIVABLE", pattern="^(RECEIVABLE|PAYABLE)$"),
     status_filter: str | None = Query(None, alias="status", max_length=32),
     project_id: str | None = Query(None, max_length=32),
     contract_id: str | None = Query(None, max_length=32),
@@ -129,6 +130,7 @@ async def list_invoices(
     rows = await billing_service.list_invoices(
         conn,
         company_id=company_scope(ctx),
+        direction=direction,
         status=status_filter,
         statuses=None,
         project_public_id=project_id,
@@ -145,6 +147,34 @@ async def list_invoices(
         row.pop("id", None)
     return build_page(
         rows, limit=page_size, cursor_keys=("created_at", "public_id"), request_id=ctx.request_id
+    )
+
+
+@router.post(
+    "/invoices",
+    response_model=InvoiceResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record a vendor bill (PAYABLE)",
+)
+async def create_vendor_bill(
+    ctx_and_conn: InvoicesCreate, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Record money this company owes a vendor.
+
+    Unlike engine generation (approved timesheets → RECEIVABLE), a vendor
+    bill is entered from the vendor's paperwork under a contract for
+    context. Amounts are still derived server-side from the line items.
+    PAYABLE invoices are exempt from the MSA gate: owing a vendor needs no
+    agreement between the companies.
+    """
+    ctx, conn = ctx_and_conn
+    return await billing_service.create_vendor_bill(
+        conn,
+        company_id=company_scope(ctx),
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        payload=payload,
     )
 
 

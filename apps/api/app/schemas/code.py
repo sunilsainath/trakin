@@ -21,7 +21,9 @@ BillingFrequency = Literal["WEEKLY", "BIWEEKLY", "MONTHLY", "QUARTERLY", "CUSTOM
 ProjectCategory = Literal["COMPANY", "INDIVIDUAL"]
 ProjectStatus = Literal["DRAFT", "PLANNING", "ACTIVE", "ON_HOLD", "COMPLETED", "CANCELLED"]
 ProjectRoleStatus = Literal["OPEN", "FILLED", "CLOSED", "ON_HOLD"]
-SowStatus = Literal["DRAFT", "PENDING_APPROVAL", "ACTIVE", "EXPIRED", "TERMINATED", "CLOSED"]
+SowStatus = Literal[
+    "DRAFT", "PENDING_APPROVAL", "ACTIVE", "REJECTED", "EXPIRED", "TERMINATED", "CLOSED"
+]
 ContractStatus = Literal[
     "DRAFT",
     "SENT",
@@ -475,6 +477,19 @@ class ContractLineItemRequest(_Strict):
         return v.upper()
 
 
+class TimesheetApprovalStepRequest(_Strict):
+    """One step of a contract's timesheet approval chain.
+
+    The approver is named by user public id (resolved server-side to the
+    internal id the approval trigger consumes); the permission they must hold
+    at decision time defaults to timesheets.approve.
+    """
+
+    user_public_id: PublicId | None = None
+    required_permission: str = Field(default="timesheets.approve", max_length=100)
+    due_within_days: int = Field(default=3, ge=1, le=90)
+
+
 class CreateContractRequest(_Strict):
     project_id: PublicId
     sow_id: PublicId
@@ -499,6 +514,9 @@ class CreateContractRequest(_Strict):
     parties: list[ContractPartyRequest] = Field(default_factory=list, max_length=20)
     roles: list[ContractRoleRequest] = Field(default_factory=list, max_length=100)
     line_items: list[ContractLineItemRequest] = Field(default_factory=list, max_length=200)
+    timesheet_approval_chain: list[TimesheetApprovalStepRequest] = Field(
+        default_factory=list, max_length=10
+    )
     terms_snapshot: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("currency")
@@ -533,6 +551,7 @@ class UpdateContractRequest(_Strict):
     document_id: PublicId | None = None
     roles: list[ContractRoleRequest] | None = None
     line_items: list[ContractLineItemRequest] | None = None
+    timesheet_approval_chain: list[TimesheetApprovalStepRequest] | None = None
     reason: str | None = Field(default=None, max_length=2000)
 
     @field_validator("currency")

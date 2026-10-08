@@ -166,6 +166,8 @@ async def w9_intake_status(
     stage states are returned, never file bytes. A PENDING extraction state
     is reported as pending — never as extracted data.
     """
+    from app.services import documents as document_service
+
     ctx, conn = ctx_and_conn
     return await document_service.get_w9_intake_status(
         conn, public_id=document_public_id, owner_user_id=ctx.user_id

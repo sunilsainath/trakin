@@ -51,11 +51,11 @@ _CONTRACT_SELECT = """
            c.payment_terms_days, c.start_date, c.end_date, c.auto_renew,
            c.renewal_notice_days, c.termination_notice_days, c.notice_period_end,
            c.governing_law, c.confidentiality_level, c.requires_timesheets, c.locked,
-           c.counterparty_company_id, c.counterparty_user_id, c.document_id,
-           c.risk_score, c.version, c.sent_at, c.responded_at, c.activated_at,
-           c.terminated_at, c.response_notes, c.created_at, c.updated_at,
-           ru.public_id AS responded_by_public_id,
-           c.metadata,
+            c.counterparty_company_id, c.counterparty_user_id, c.document_id,
+            c.risk_score, c.version, c.sent_at, c.responded_at, c.activated_at,
+            c.terminated_at, c.response_notes, c.created_at, c.updated_at,
+            ru.public_id AS responded_by_public_id,
+            c.metadata, c.timesheet_approval_chain,
            p.public_id AS project_public_id, p.name AS project_name,
            s.public_id AS sow_public_id, s.title AS sow_title,
            cp.public_id AS counterparty_company_public_id,
@@ -449,6 +449,13 @@ async def create_contract(
         requested=payload.get("roles") or [],
     )
 
+    approval_chain = await resolve_approval_chain(
+        conn,
+        company_id=company_id,
+        counterparty_company_id=counterparty_company,
+        requested=payload.get("timesheet_approval_chain") or [],
+    )
+
     start_date = payload.get("start_date") or sow.get("start_date")
     end_date = payload.get("end_date") or sow.get("end_date")
     contract_value = payload.get("contract_value")
@@ -478,14 +485,14 @@ async def create_contract(
                        start_date, end_date, auto_renew, renewal_notice_days,
                        termination_notice_days, governing_law, confidentiality_level,
                        requires_timesheets, counterparty_company_id, counterparty_user_id,
-                       document_id, metadata, created_by)
+                       document_id, metadata, timesheet_approval_chain, created_by)
                     VALUES
                       (:sow, :pid, :cid, :ctype, :title, 'DRAFT',
                        :currency, :basis, :frequency, :terms,
                        :start_date, :end_date, :auto_renew, :renewal_notice,
                        :termination_notice, :law, :confidentiality,
                        :requires_timesheets, :counterparty_company, :counterparty_user,
-                       :document_id, CAST(:metadata AS jsonb), :actor)
+                       :document_id, CAST(:metadata AS jsonb), CAST(:chain AS jsonb), :actor)
                     RETURNING public_id
                     """
                 ),
@@ -511,6 +518,7 @@ async def create_contract(
                     "counterparty_user": counterparty_user,
                     "document_id": document_id,
                     "metadata": _json(metadata),
+                    "chain": _json(approval_chain),
                     "actor": actor_user_id,
                 },
             )
@@ -567,6 +575,111 @@ async def create_contract(
         ip_address=ip_address,
     )
     return await get_contract(conn, company_id=company_id, public_id=str(row["public_id"]))
+
+
+async def generate_contracts_from_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    sow_public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> list[str]:
+    """Create one DRAFT contract per SOW role ("one role = one contract").
+
+    Runs on company SOW acceptance when the SOW opts into auto-generation.
+    Contracts start as drafts: commercial terms still go through send/accept.
+    Roles that already have a contract (e.g. after a reopen + re-accept) are
+    skipped, so generation is idempotent per role.
+    """
+    sow = await resolve_scoped(conn, "sows", sow_public_id, company_id)
+    roles = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT sr.id AS sow_role_id, sr.quantity, sr.rate, sr.rate_type,
+                           sr.currency, pr.public_id AS project_role_public_id,
+                           pr.title AS role_title
+                      FROM public.sow_roles sr
+                      JOIN public.project_roles pr ON pr.id = sr.project_role_id
+                     WHERE sr.sow_id = :sid
+                    """
+                ),
+                {"sid": sow["id"]},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    covered = {
+        str(r)
+        for r in (
+            await conn.execute(
+                text(
+                    """
+                    SELECT DISTINCT cr.sow_role_id
+                      FROM public.contract_roles cr
+                      JOIN public.contracts c ON c.id = cr.contract_id
+                     WHERE c.sow_id = :sid AND c.deleted_at IS NULL
+                       AND cr.sow_role_id IS NOT NULL
+                    """
+                ),
+                {"sid": sow["id"]},
+            )
+        ).scalars()
+    }
+    project_public_id = (
+        await conn.execute(
+            text("SELECT public_id FROM public.projects WHERE id = :pid"),
+            {"pid": sow["project_id"]},
+        )
+    ).scalar_one()
+
+    created: list[str] = []
+    for role in roles:
+        if str(role["sow_role_id"]) in covered:
+            continue
+        contract = await create_contract(
+            conn,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+            ip_address=ip_address,
+            payload={
+                "project_id": str(project_public_id),
+                "sow_id": sow_public_id,
+                "title": f"{sow['title']} — {role['role_title']}",
+                "currency": role["currency"] or sow.get("currency", "USD"),
+                "billing_basis": sow.get("billing_basis", "TIMESHEET"),
+                "billing_frequency": sow.get("billing_frequency", "MONTHLY"),
+                "payment_terms_days": sow.get("payment_terms_days", 30),
+                "start_date": sow.get("start_date"),
+                "end_date": sow.get("end_date"),
+                "roles": [
+                    {
+                        "project_role_id": str(role["project_role_public_id"]),
+                        "quantity": role["quantity"],
+                        "rate": role["rate"],
+                        "rate_type": role["rate_type"],
+                        "currency": role["currency"] or sow.get("currency", "USD"),
+                    }
+                ],
+            },
+        )
+        # Link the single generated role back to its SOW role: sow_roles carry
+        # no public id, so the link is recorded here rather than at insert.
+        # It is what makes regeneration idempotent per role.
+        await conn.execute(
+            text(
+                "UPDATE public.contract_roles SET sow_role_id = :sr"
+                " WHERE contract_id = (SELECT id FROM public.contracts WHERE public_id = :pid)"
+            ),
+            {"sr": role["sow_role_id"], "pid": str(contract["public_id"])},
+        )
+        created.append(str(contract["public_id"]))
+    return created
 
 
 async def _resolve_contract_roles(
@@ -746,6 +859,94 @@ async def _insert_contract_line_items(
 # =============================================================================
 # update / versions
 # =============================================================================
+async def resolve_approval_chain(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    counterparty_company_id: uuid.UUID | None,
+    requested: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate a timesheet approval chain into the trigger's step shape.
+
+    Each step names an approver by user public id (resolved here to the
+    internal id the `build_approval_chain` trigger consumes) plus the
+    permission they must hold at decision time. Approvers must be active
+    members of either side of the contract — a stranger cannot be inserted
+    into someone else's approval path.
+    """
+    steps: list[dict[str, Any]] = []
+    for position, step in enumerate(requested, start=1):
+        permission = str(step.get("required_permission") or "timesheets.approve")
+        known = (
+            await conn.execute(
+                text("SELECT 1 FROM public.permissions WHERE key = :key"),
+                {"key": permission},
+            )
+        ).first()
+        if known is None:
+            raise BusinessRuleViolationError(
+                f"Approval step {position} names an unknown permission.",
+                details={"step": position, "permission": permission},
+            )
+        user_public_id = step.get("user_public_id")
+        user_id: uuid.UUID | None = None
+        member_company: uuid.UUID | None = None
+        if user_public_id:
+            member = (
+                (
+                    await conn.execute(
+                        text(
+                            """
+                            SELECT m.user_id, m.company_id, u.public_id
+                              FROM public.company_memberships m
+                              JOIN public.users u ON u.id = m.user_id
+                             WHERE u.public_id = :pid AND m.status = 'ACTIVE'
+                               AND (m.company_id = :own
+                                    OR (CAST(:cp AS uuid) IS NOT NULL
+                                        AND m.company_id = CAST(:cp AS uuid)))
+                            """
+                        ),
+                        {
+                            "pid": str(user_public_id),
+                            "own": company_id,
+                            "cp": str(counterparty_company_id) if counterparty_company_id else None,
+                        },
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if member is None:
+                raise BusinessRuleViolationError(
+                    f"Approval step {position} names someone outside this contract.",
+                    details={"step": position, "user_public_id": str(user_public_id)},
+                )
+            user_id = uuid.UUID(str(member["user_id"]))
+            member_company = uuid.UUID(str(member["company_id"]))
+        try:
+            due_within = int(step.get("due_within_days", 3))
+        except (TypeError, ValueError):
+            raise BusinessRuleViolationError(
+                f"Approval step {position} has an invalid due window.",
+                details={"step": position},
+            ) from None
+        if not 1 <= due_within <= 90:
+            raise BusinessRuleViolationError(
+                f"Approval step {position} must be due within 1-90 days.",
+                details={"step": position, "due_within_days": due_within},
+            )
+        steps.append(
+            {
+                "user_id": str(user_id) if user_id else None,
+                "user_public_id": str(user_public_id) if user_public_id else None,
+                "company_id": str(member_company or company_id),
+                "required_permission": permission,
+                "due_within_days": due_within,
+            }
+        )
+    return {"steps": steps}
+
+
 _CONTRACT_UPDATABLE = frozenset(
     {
         "title",
@@ -806,6 +1007,21 @@ async def update_contract(
         text("UPDATE public.contracts SET metadata = CAST(:meta AS jsonb) WHERE id = :rid"),
         {"meta": _json(new_metadata), "rid": before["id"]},
     )
+
+    if changes.get("timesheet_approval_chain") is not None:
+        chain = await resolve_approval_chain(
+            conn,
+            company_id=company_id,
+            counterparty_company_id=before["counterparty_company_id"],
+            requested=changes["timesheet_approval_chain"],
+        )
+        await conn.execute(
+            text(
+                "UPDATE public.contracts SET timesheet_approval_chain = CAST(:chain AS jsonb)"
+                " WHERE id = :rid"
+            ),
+            {"chain": _json(chain), "rid": before["id"]},
+        )
 
     if changes.get("roles") is not None:
         resolved = await _resolve_contract_roles(

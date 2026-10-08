@@ -491,15 +491,11 @@ async def test_company_post_carries_publisher_identity(conn, skeleton, tenants) 
     assert created["company_public_id"] == tenant.company_public_id
     assert created["company_name"]
 
-    reread = await social.get_post(
-        conn, viewer_id=tenant.user_id, public_id=created["public_id"]
-    )
+    reread = await social.get_post(conn, viewer_id=tenant.user_id, public_id=created["public_id"])
     assert reread["company_public_id"] == tenant.company_public_id
 
 
 async def test_personal_post_carries_no_company_identity(conn, skeleton, tenants) -> None:
-    from app.services import social
-
     tenant = tenants["admin"]
     # Even with a company context present, a personal post is personal.
     created = await _post(conn, skeleton, tenant)
@@ -545,7 +541,8 @@ async def test_company_post_requires_posts_create(conn, skeleton, tenants) -> No
     ).scalar_one()
     await conn.execute(
         text(
-            "INSERT INTO public.company_memberships (company_id, user_id, role_id, status, joined_at) "
+            "INSERT INTO public.company_memberships "
+            "(company_id, user_id, role_id, status, joined_at) "
             "VALUES (:cid, :uid, :rid, 'ACTIVE', now())"
         ),
         {"cid": admin.company_id, "uid": user_id, "rid": role_id},

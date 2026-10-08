@@ -722,56 +722,227 @@ function LineItemsTab({ contract }: { contract: Contract }) {
 
 function ApprovalsTab({ contract }: { contract: Contract }) {
   return (
+    <div className="space-y-6">
+      <TimesheetChainCard contract={contract} />
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FileCheck2 aria-hidden className="size-4 text-primary" />
+            Approval steps
+          </CardTitle>
+          <CardDescription>
+            Each step names the permission it needs. The server refuses a step you
+            proposed yourself.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {contract.approval_steps.length === 0 ? (
+            <EmptyState
+              title="No approval steps"
+              description="This contract did not go through a multi-step approval flow."
+            />
+          ) : (
+            <ol className="space-y-3">
+              {contract.approval_steps.map((step) => (
+                <li
+                  key={step.step_no}
+                  className="rounded-md border border-border p-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-medium">
+                      Step {step.step_no}: {step.name}
+                    </p>
+                    <StatusBadge status={step.status} />
+                  </div>
+                  <dl className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-3">
+                    <div>
+                      <dt className="text-muted-foreground">Permission</dt>
+                      <dd className="font-mono">{step.required_permission ?? 'none'}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Approver</dt>
+                      <dd className="font-mono">{step.approver_user_id ?? 'unassigned'}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Decided</dt>
+                      <dd>{step.decided_at ? formatDateTime(step.decided_at) : 'pending'}</dd>
+                    </div>
+                  </dl>
+                  {step.notes ? (
+                    <p className="mt-2 text-sm text-muted-foreground">{step.notes}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+/**
+ * The timesheet approval chain: who reviews submitted sheets, in which
+ * order. Editable while the contract is a draft; afterwards the chain is
+ * frozen because submitted sheets already materialised their steps from it.
+ */
+function TimesheetChainCard({ contract }: { contract: Contract }) {
+  const { activeCompanyPublicId, can } = useCompany()
+  const [userId, setUserId] = React.useState('')
+  const [permission, setPermission] = React.useState('timesheets.approve')
+  const [dueDays, setDueDays] = React.useState('3')
+
+  const members = useCompanyQuery<
+    { user: { public_id: string; display_name: string }; role_name: string }[]
+  >({
+    companyPublicId: activeCompanyPublicId,
+    queryKey: ['company', 'members'],
+    path: '/companies/current/members',
+    enabled: can('contracts.update') && contract.status === 'DRAFT',
+  })
+
+  const steps = contract.timesheet_approval_chain?.steps ?? []
+  const editable = can('contracts.update') && contract.status === 'DRAFT'
+
+  const save = useCompanyMutation<unknown, { steps: unknown[] }>({
+    context: { companyPublicId: activeCompanyPublicId },
+    mutationFn: (body) =>
+      api.patch(`/contracts/${contract.public_id}`, body, {
+        companyPublicId: activeCompanyPublicId,
+      }),
+    invalidate: [['contracts', 'detail', contract.public_id]],
+    onSuccess: () => {
+      notifySuccess('Approval chain saved.', 'Submitted timesheets will follow these steps in order.')
+    },
+  })
+
+  const replace = (next: typeof steps) => {
+    save
+      .mutateAsync({
+        steps: next.map((step) => ({
+          user_public_id: step.user_public_id,
+          required_permission: step.required_permission,
+          due_within_days: step.due_within_days,
+        })),
+      })
+      .catch((cause) => notifyError(cause, 'The approval chain could not be saved.'))
+  }
+
+  const add = () => {
+    if (!userId) return
+    const due = Math.min(90, Math.max(1, Number(dueDays) || 3))
+    void replace([
+      ...steps,
+      { user_id: null, user_public_id: userId, company_id: '', required_permission: permission, due_within_days: due },
+    ])
+    setUserId('')
+  }
+
+  const nameFor = (step: (typeof steps)[number]) => {
+    const member = (members.data ?? []).find((m) => m.user.public_id === step.user_public_id)
+    return member ? `${member.user.display_name} (${step.user_public_id})` : (step.user_public_id ?? 'Anyone with the permission')
+  }
+
+  return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <FileCheck2 aria-hidden className="size-4 text-primary" />
-          Approval steps
+          <Users aria-hidden className="size-4 text-primary" />
+          Timesheet approval chain
         </CardTitle>
         <CardDescription>
-          Each step names the permission it needs. The server refuses a step you
-          proposed yourself.
+          {steps.length === 0
+            ? 'No chain configured: submitted sheets fall back to a single approval step.'
+            : 'Submitted sheets create one approval per step, in order. A rejection at any step returns the sheet.'}
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        {contract.approval_steps.length === 0 ? (
-          <EmptyState
-            title="No approval steps"
-            description="This contract did not go through a multi-step approval flow."
-          />
-        ) : (
-          <ol className="space-y-3">
-            {contract.approval_steps.map((step) => (
+      <CardContent className="space-y-3">
+        {steps.length > 0 ? (
+          <ol className="space-y-2">
+            {steps.map((step, index) => (
               <li
-                key={step.step_no}
-                className="rounded-md border border-border p-3"
+                key={`${step.user_public_id ?? 'any'}-${index}`}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm"
               >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-medium">
-                    Step {step.step_no}: {step.name}
-                  </p>
-                  <StatusBadge status={step.status} />
-                </div>
-                <dl className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-3">
-                  <div>
-                    <dt className="text-muted-foreground">Permission</dt>
-                    <dd className="font-mono">{step.required_permission ?? 'none'}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">Approver</dt>
-                    <dd className="font-mono">{step.approver_user_id ?? 'unassigned'}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">Decided</dt>
-                    <dd>{step.decided_at ? formatDateTime(step.decided_at) : 'pending'}</dd>
-                  </div>
-                </dl>
-                {step.notes ? (
-                  <p className="mt-2 text-sm text-muted-foreground">{step.notes}</p>
+                <span className="min-w-0">
+                  <span className="font-medium">Step {index + 1}</span>
+                  <span className="text-muted-foreground"> · {nameFor(step)}</span>
+                  <span className="block font-mono text-2xs text-subtle-foreground">
+                    {step.required_permission} · due in {step.due_within_days}d
+                  </span>
+                </span>
+                {editable ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={save.isPending}
+                    onClick={() => replace(steps.filter((_, position) => position !== index))}
+                  >
+                    Remove
+                  </Button>
                 ) : null}
               </li>
             ))}
           </ol>
+        ) : null}
+
+        {editable ? (
+          <div className="flex flex-wrap items-end gap-2 border-t border-border/60 pt-3">
+            <div className="min-w-40 flex-1">
+              <label htmlFor="chain-user" className="mb-1 block text-xs font-medium text-muted-foreground">
+                Approver
+              </label>
+              <select
+                id="chain-user"
+                value={userId}
+                onChange={(event) => setUserId(event.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">Anyone with the permission…</option>
+                {(members.data ?? []).map((member) => (
+                  <option key={member.user.public_id} value={member.user.public_id}>
+                    {member.user.display_name} · {member.role_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="chain-permission" className="mb-1 block text-xs font-medium text-muted-foreground">
+                Permission
+              </label>
+              <select
+                id="chain-permission"
+                value={permission}
+                onChange={(event) => setPermission(event.target.value)}
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="timesheets.approve">timesheets.approve</option>
+                <option value="timesheets.lock">timesheets.lock</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="chain-due" className="mb-1 block text-xs font-medium text-muted-foreground">
+                Due (days)
+              </label>
+              <input
+                id="chain-due"
+                type="number"
+                min={1}
+                max={90}
+                value={dueDays}
+                onChange={(event) => setDueDays(event.target.value)}
+                className="h-9 w-20 rounded-md border border-input bg-background px-2 text-sm"
+              />
+            </div>
+            <Button size="sm" disabled={save.isPending} onClick={add}>
+              {save.isPending ? 'Saving…' : 'Add step'}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            The chain can only be changed while the contract is a draft
+            {can('contracts.update') ? '' : ' and by someone holding contracts.update'}.
+          </p>
         )}
       </CardContent>
     </Card>

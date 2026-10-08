@@ -17,6 +17,7 @@ import {
   SOW_STATUSES,
   type Page as PageEnvelope,
   type Project,
+  type ProjectRole,
   type Sow,
 } from '@/lib/domain-types'
 import { Button, Dialog, EmptyState, Input, Select } from '@/components/ui'
@@ -264,9 +265,19 @@ const sowSchema = z
     description: z.string().trim().max(20000).optional(),
     sow_type: z.enum(['COMPANY', 'INDIVIDUAL']),
     counterparty_company_id: z.string().trim().optional(),
+    counterparty_user_id: z.string().trim().optional(),
     currency: z.string().length(3),
     billing_basis: z.enum(['TIMESHEET', 'FIXED', 'RECURRING', 'USAGE', 'MILESTONE']),
     billing_frequency: z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'CUSTOM']),
+    invoice_frequency: z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'QUARTERLY', 'CUSTOM']),
+    payment_terms_days: z.coerce.number().int().min(0).max(365),
+    payment_method: z.string().trim().max(64).optional(),
+    default_rate: z.string().trim().optional(),
+    max_total_amount: z.string().trim().optional(),
+    scope: z.string().trim().max(40000).optional(),
+    special_conditions: z.string().trim().max(20000).optional(),
+    document_id: z.string().trim().optional(),
+    auto_generate_contracts: z.boolean(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
   })
@@ -283,12 +294,30 @@ const EMPTY_SOW: SowFormValues = {
   description: '',
   sow_type: 'COMPANY',
   counterparty_company_id: '',
+  counterparty_user_id: '',
   currency: 'USD',
   billing_basis: 'TIMESHEET',
   billing_frequency: 'MONTHLY',
+  invoice_frequency: 'MONTHLY',
+  payment_terms_days: 30,
+  payment_method: '',
+  default_rate: '',
+  max_total_amount: '',
+  scope: '',
+  special_conditions: '',
+  document_id: '',
+  auto_generate_contracts: true,
   start_date: '',
   end_date: '',
 }
+
+interface SowRoleRow {
+  project_role_id: string
+  quantity: number
+  rate: string
+}
+
+const PAYMENT_METHODS = ['BANK_TRANSFER', 'CARD', 'CHEQUE', 'CASH', 'OTHER']
 
 function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }) {
   const router = useRouter()
@@ -297,11 +326,15 @@ function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }
   const [values, setValues] = React.useState<SowFormValues>(EMPTY_SOW)
   const [errors, setErrors] = React.useState<Partial<Record<string, string>>>({})
   const [projects, setProjects] = React.useState<Project[]>([])
+  const [availableRoles, setAvailableRoles] = React.useState<ProjectRole[]>([])
+  const [roleRows, setRoleRows] = React.useState<SowRoleRow[]>([])
 
   React.useEffect(() => {
     if (!open) return
     setValues(EMPTY_SOW)
     setErrors({})
+    setRoleRows([])
+    setAvailableRoles([])
     void api
       .get<PageEnvelope<Project>>('/projects?limit=100', {
         companyPublicId: activeCompanyPublicId,
@@ -310,24 +343,67 @@ function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }
       .catch(() => setProjects([]))
   }, [open, activeCompanyPublicId])
 
-  const create = useCompanyMutation<Sow, SowFormValues>({
+  const loadRoles = React.useCallback(
+    (projectId: string) => {
+      if (!projectId) {
+        setAvailableRoles([])
+        return
+      }
+      void api
+        .get<PageEnvelope<ProjectRole>>(
+          `/project-roles?project_id=${encodeURIComponent(projectId)}&limit=100`,
+          { companyPublicId: activeCompanyPublicId },
+        )
+        .then((page) => setAvailableRoles(page.data ?? []))
+        .catch(() => setAvailableRoles([]))
+    },
+    [activeCompanyPublicId],
+  )
+
+  React.useEffect(() => {
+    if (open) loadRoles(values.project_id)
+  }, [open, values.project_id, loadRoles])
+
+  const create = useCompanyMutation<Sow, SowFormValues & { roles: SowRoleRow[] }>({
     context: { companyPublicId: activeCompanyPublicId },
-    mutationFn: (form) =>
-      api.post<Sow>(
+    mutationFn: (form) => {
+      const amount = (raw: string | undefined) => {
+        const trimmed = (raw ?? '').trim()
+        if (!trimmed) return undefined
+        const parsed = Number(trimmed)
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined
+      }
+      return api.post<Sow>(
         `/sows?project_id=${encodeURIComponent(form.project_id)}`,
         {
           title: form.title,
           description: form.description?.trim() || undefined,
           sow_type: form.sow_type,
           counterparty_company_id: form.counterparty_company_id?.trim() || undefined,
+          counterparty_user_id: form.counterparty_user_id?.trim() || undefined,
           currency: form.currency,
           billing_basis: form.billing_basis,
           billing_frequency: form.billing_frequency,
+          invoice_frequency: form.invoice_frequency,
+          payment_terms_days: form.payment_terms_days,
+          payment_method: form.payment_method?.trim() || undefined,
+          default_rate: amount(form.default_rate),
+          max_total_amount: amount(form.max_total_amount),
+          scope: form.scope?.trim() || undefined,
+          special_conditions: form.special_conditions?.trim() || undefined,
+          document_id: form.document_id?.trim() || undefined,
+          auto_generate_contracts: form.auto_generate_contracts,
+          roles: form.roles.map((row) => ({
+            project_role_id: row.project_role_id,
+            quantity: row.quantity,
+            ...(amount(row.rate) !== undefined ? { rate: amount(row.rate) } : {}),
+          })),
           start_date: form.start_date || undefined,
           end_date: form.end_date || undefined,
         },
         { companyPublicId: activeCompanyPublicId },
-      ),
+      )
+    },
     invalidate: [['sows']],
     onSuccess: (sow) => {
       notifySuccess('SOW created.', `${sow.title} · ${sow.public_id}`)
@@ -338,6 +414,11 @@ function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }
 
   const set = <K extends keyof SowFormValues>(key: K, value: SowFormValues[K]) =>
     setValues((previous) => ({ ...previous, [key]: value }))
+
+  const addRole = (projectRoleId: string) => {
+    if (!projectRoleId || roleRows.some((row) => row.project_role_id === projectRoleId)) return
+    setRoleRows((previous) => [...previous, { project_role_id: projectRoleId, quantity: 1, rate: '' }])
+  }
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -351,9 +432,17 @@ function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }
       setErrors(next)
       return
     }
+    if (parsed.data.sow_type === 'COMPANY' && !parsed.data.counterparty_company_id?.trim() && !parsed.data.counterparty_user_id?.trim()) {
+      setErrors({ counterparty_company_id: 'Name the counterparty company or user.' })
+      return
+    }
+    if (parsed.data.sow_type === 'INDIVIDUAL' && !parsed.data.counterparty_user_id?.trim()) {
+      setErrors({ counterparty_user_id: 'Name the counterparty user (U…).' })
+      return
+    }
     setErrors({})
     try {
-      await create.mutateAsync(parsed.data)
+      await create.mutateAsync({ ...parsed.data, roles: roleRows })
     } catch (cause) {
       notifyError(cause, 'The SOW could not be created.')
     }
@@ -400,7 +489,10 @@ function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }
             <Select
               id="sow-project"
               value={values.project_id}
-              onChange={(event) => set('project_id', event.target.value)}
+              onChange={(event) => {
+                set('project_id', event.target.value)
+                setRoleRows([])
+              }}
               aria-invalid={Boolean(errors.project_id)}
             >
               <option value="">Choose a project…</option>
@@ -427,21 +519,132 @@ function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }
               <Select
                 id="sow-type"
                 value={values.sow_type}
-                onChange={(event) => set('sow_type', event.target.value as SowFormValues['sow_type'])}
+                onChange={(event) => {
+                  const next = event.target.value as SowFormValues['sow_type']
+                  setValues((previous) => ({
+                    ...previous,
+                    sow_type: next,
+                    counterparty_company_id: next === 'COMPANY' ? previous.counterparty_company_id : '',
+                    counterparty_user_id: next === 'INDIVIDUAL' ? previous.counterparty_user_id : '',
+                  }))
+                }}
               >
                 <option value="COMPANY">Company</option>
                 <option value="INDIVIDUAL">Individual</option>
               </Select>
             </Field>
-            <Field label="Counterparty company ID" error={errors.counterparty_company_id}>
-              <Input
-                id="sow-counterparty"
-                value={values.counterparty_company_id ?? ''}
-                onChange={(event) => set('counterparty_company_id', event.target.value)}
-                placeholder="CO… (optional)"
-              />
-            </Field>
+            {values.sow_type === 'INDIVIDUAL' ? (
+              <Field label="Counterparty user ID" error={errors.counterparty_user_id} required hint="The U… identifier of the person">
+                <Input
+                  id="sow-counterparty-user"
+                  value={values.counterparty_user_id ?? ''}
+                  onChange={(event) => set('counterparty_user_id', event.target.value.toUpperCase())}
+                  placeholder="U…"
+                  className="font-mono"
+                />
+              </Field>
+            ) : (
+              <Field label="Counterparty company ID" error={errors.counterparty_company_id} hint="The CO… identifier, when the other side is a company">
+                <Input
+                  id="sow-counterparty"
+                  value={values.counterparty_company_id ?? ''}
+                  onChange={(event) => set('counterparty_company_id', event.target.value.toUpperCase())}
+                  placeholder="CO… (optional)"
+                  className="font-mono"
+                />
+              </Field>
+            )}
           </FieldGrid>
+
+          <Field label="Roles and quantities" hint="Each role becomes one contract when the SOW is accepted.">
+            {availableRoles.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {values.project_id
+                  ? 'This project has no roles yet — add them on the project first.'
+                  : 'Choose a project to list its roles.'}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {roleRows.map((row, index) => {
+                  const role = availableRoles.find((candidate) => candidate.public_id === row.project_role_id)
+                  return (
+                    <div key={row.project_role_id} className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate text-sm">
+                        {role?.title ?? row.project_role_id}
+                      </span>
+                      <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                        Qty
+                        <Input
+                          type="number"
+                          min={1}
+                          value={row.quantity}
+                          onChange={(event) =>
+                            setRoleRows((previous) =>
+                              previous.map((candidate, position) =>
+                                position === index
+                                  ? { ...candidate, quantity: Math.max(1, Number(event.target.value) || 1) }
+                                  : candidate,
+                              ),
+                            )
+                          }
+                          className="w-16"
+                          aria-label={`Quantity for ${role?.title ?? row.project_role_id}`}
+                        />
+                      </label>
+                      <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                        Rate
+                        <Input
+                          value={row.rate}
+                          onChange={(event) =>
+                            setRoleRows((previous) =>
+                              previous.map((candidate, position) =>
+                                position === index
+                                  ? { ...candidate, rate: event.target.value }
+                                  : candidate,
+                              ),
+                            )
+                          }
+                          className="w-24"
+                          placeholder="Optional"
+                          aria-label={`Rate for ${role?.title ?? row.project_role_id}`}
+                        />
+                      </label>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          setRoleRows((previous) => previous.filter((_, position) => position !== index))
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  )
+                })}
+                <div className="flex gap-2">
+                  <Select
+                    id="sow-add-role"
+                    value=""
+                    onChange={(event) => {
+                      addRole(event.target.value)
+                      event.target.value = ''
+                    }}
+                    aria-label="Add a project role"
+                  >
+                    <option value="">Add a role…</option>
+                    {availableRoles
+                      .filter((role) => !roleRows.some((row) => row.project_role_id === role.public_id))
+                      .map((role) => (
+                        <option key={role.public_id} value={role.public_id}>
+                          {role.title} · {role.public_id}
+                        </option>
+                      ))}
+                  </Select>
+                </div>
+              </div>
+            )}
+          </Field>
 
           <FieldGrid>
             <Field label="Currency">
@@ -479,7 +682,101 @@ function CreateSowDialog({ triggerLabel = 'New SOW' }: { triggerLabel?: string }
                 ))}
               </Select>
             </Field>
+            <Field label="Invoice frequency">
+              <Select
+                id="sow-invoice-frequency"
+                value={values.invoice_frequency}
+                onChange={(event) =>
+                  set('invoice_frequency', event.target.value as SowFormValues['invoice_frequency'])
+                }
+              >
+                {BILLING_FREQUENCIES.map((frequency) => (
+                  <option key={frequency} value={frequency}>
+                    {statusLabel(frequency)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Payment terms (days)">
+              <Input
+                id="sow-terms"
+                type="number"
+                min={0}
+                max={365}
+                value={values.payment_terms_days}
+                onChange={(event) => set('payment_terms_days', Number(event.target.value) || 0)}
+              />
+            </Field>
+            <Field label="Payment method" hint="Optional">
+              <Select
+                id="sow-payment-method"
+                value={values.payment_method ?? ''}
+                onChange={(event) => set('payment_method', event.target.value)}
+              >
+                <option value="">Unspecified</option>
+                {PAYMENT_METHODS.map((method) => (
+                  <option key={method} value={method}>
+                    {statusLabel(method)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Default rate" hint="Optional hourly fallback">
+              <Input
+                id="sow-rate"
+                value={values.default_rate ?? ''}
+                onChange={(event) => set('default_rate', event.target.value)}
+                placeholder="150.00"
+              />
+            </Field>
+            <Field label="Maximum total" hint="Optional cap">
+              <Input
+                id="sow-max"
+                value={values.max_total_amount ?? ''}
+                onChange={(event) => set('max_total_amount', event.target.value)}
+                placeholder="50000.00"
+              />
+            </Field>
+            <Field label="Linked document ID" hint="Optional D… reference">
+              <Input
+                id="sow-document"
+                value={values.document_id ?? ''}
+                onChange={(event) => set('document_id', event.target.value.toUpperCase())}
+                placeholder="D…"
+                className="font-mono"
+              />
+            </Field>
           </FieldGrid>
+
+          <Field label="Scope" hint="Optional — what is included">
+            <Input
+              id="sow-scope"
+              value={values.scope ?? ''}
+              onChange={(event) => set('scope', event.target.value)}
+            />
+          </Field>
+          <Field label="Special conditions" hint="Optional">
+            <Input
+              id="sow-conditions"
+              value={values.special_conditions ?? ''}
+              onChange={(event) => set('special_conditions', event.target.value)}
+            />
+          </Field>
+
+          <label className="flex cursor-pointer items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={values.auto_generate_contracts}
+              onChange={(event) => set('auto_generate_contracts', event.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Generate one draft contract per role on acceptance</span>
+              <span className="block text-xs text-muted-foreground">
+                Drafts still go through send and accept before they become active.
+              </span>
+            </span>
+          </label>
 
           <FieldGrid>
             <Field label="Start date" error={errors.start_date}>

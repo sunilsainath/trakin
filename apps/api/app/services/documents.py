@@ -492,7 +492,9 @@ async def create_document(
                     VALUES
                       (:cid, :actor, :doc_type, :title, :description,
                        :visibility, :related_type, CAST(:related_id AS uuid),
-                       CASE WHEN :storage_path IS NULL THEN 'READY' ELSE 'PROCESSING' END,
+                       CASE WHEN CAST(:storage_path AS text) IS NULL
+                            THEN CAST('READY' AS document_status)
+                            ELSE CAST('PROCESSING' AS document_status) END,
                        :checksum)
                     RETURNING public_id
                     """
@@ -514,8 +516,8 @@ async def create_document(
         .mappings()
         .first()
     )
-    document_id = await resolve_scoped(
-        conn, "documents", str(row["public_id"]), company_id, columns="id"
+    document_id = (
+        await resolve_scoped(conn, "documents", str(row["public_id"]), company_id, columns="id")
     )["id"]
 
     if storage_path is not None:
@@ -565,6 +567,20 @@ VALUES (CAST(:did AS uuid), 1, :bucket, :file_name, :content_type, :size,
         },
         request_id=request_id,
         ip_address=ip_address,
+    )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="DOCUMENT_UPLOADED",
+        aggregate_type="document",
+        aggregate_id=str(document_id),
+        company_id=company_id,
+        payload={
+            "company_id": str(company_id),
+            "public_id": str(row["public_id"]),
+            "title": title,
+        },
     )
     return await get_document(conn, company_id=company_id, public_id=str(row["public_id"]))
 
@@ -646,6 +662,20 @@ async def add_version(
         reason=reason,
         request_id=request_id,
         ip_address=ip_address,
+    )
+    from app.services import events as event_service
+
+    await event_service.emit_event(
+        conn,
+        event_type="DOCUMENT_UPLOADED",
+        aggregate_type="document",
+        aggregate_id=str(document["id"]),
+        company_id=company_id,
+        payload={
+            "company_id": str(company_id),
+            "public_id": public_id,
+            "version_no": version_no,
+        },
     )
     return await get_document(conn, company_id=company_id, public_id=public_id)
 
