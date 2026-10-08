@@ -47,6 +47,12 @@ def build_engine(settings: Settings | None = None) -> AsyncEngine:
         "echo": False,
         "pool_pre_ping": True,
         "future": True,
+        # Named server-side prepared statements do not survive a transaction
+        # pooler (Supabase PgBouncer multiplexes backends, so a statement name
+        # prepared on one backend collides on the next: DuplicatePreparedStatement).
+        # Every other connection in this repo (tests, scripts, workers) already
+        # connects with prepare_threshold=None; the app engine must match.
+        "connect_args": {"prepare_threshold": None},
     }
 
     if settings.db_pooled:

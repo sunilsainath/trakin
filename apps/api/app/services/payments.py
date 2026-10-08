@@ -835,6 +835,18 @@ async def record_payment(
 
     idempotency_key = payload.get("idempotency_key") or f"payment:{company_id}:{request_id}"
 
+    # ck_payment_ref requires every COMPLETED payment to carry a processor
+    # reference or a bank transaction link. A manual/offline movement confirmed
+    # elsewhere is honestly labelled offline:<key>; a live processor payment
+    # without an executed reference cannot be recorded as completed.
+    processor_ref = payload.get("processor_payment_ref")
+    if processor_ref is None and processor.key == "manual":
+        processor_ref = f"offline:{idempotency_key}"
+    if processor_ref is None:
+        raise ValidationError(
+            "A processor payment needs its executed processor reference before it can be recorded.",
+        )
+
     row = (
         (
             await conn.execute(
@@ -845,13 +857,17 @@ async def record_payment(
                        counterparty_company_id, counterparty_name, amount, currency,
                        fee_amount, payment_method, scheduled_for, authorization_type,
                        authorized_by, authorized_at, authorization_ref, processor,
+                       processor_payment_ref, completed_at,
                        idempotency_key, reconciliation_status, metadata, created_by)
                     VALUES
                       (:cid, :direction, 'COMPLETED', CAST(:bank_account AS uuid),
                        CAST(:counterparty AS uuid), :counterparty_name, :amount, :currency,
-                       :fee, :method, :scheduled, 'EXPLICIT', :actor, now(),
-                       :auth_ref, :processor, :idempotency_key,
-                       CASE WHEN :bank_account_id IS NULL THEN 'MANUAL' ELSE 'PENDING' END,
+                       :fee, :method, CAST(:scheduled AS timestamptz), 'EXPLICIT', :actor, now(),
+                       :auth_ref, :processor,
+                       :processor_ref, now(),
+                       :idempotency_key,
+                       CASE WHEN CAST(:bank_account_id AS uuid) IS NULL
+                            THEN 'MANUAL' ELSE 'PENDING' END,
                        CAST(:metadata AS jsonb), :actor)
                     ON CONFLICT (idempotency_key) DO NOTHING
                     RETURNING public_id
@@ -871,6 +887,7 @@ async def record_payment(
                     "actor": actor_user_id,
                     "auth_ref": f"user:{actor_user_id}",
                     "processor": processor.key.upper(),
+                    "processor_ref": processor_ref,
                     "idempotency_key": idempotency_key,
                     "bank_account_id": payload.get("bank_account_id"),
                     "metadata": _json(
@@ -900,13 +917,6 @@ async def record_payment(
 
     public_id = str(row["public_id"])
     internal = await resolve_scoped(conn, "payments", public_id, company_id)
-    await conn.execute(
-        text(
-            "UPDATE public.payments SET completed_at = now(), processor_payment_ref = :ref"
-            " WHERE id = :rid"
-        ),
-        {"ref": f"offline:{public_id}", "rid": internal["id"]},
-    )
 
     await audit.record(
         conn,
@@ -1161,7 +1171,12 @@ async def suggest_matches(
         amount = abs(as_decimal(txn["amount"]))
 
         amount_score = _ratio_score(amount, balance)
-        days_late = abs((txn["posted_at"] - cand["due_date"]).days)
+        # posted_at arrives as a datetime, due_date as a date: compare dates.
+        posted = txn["posted_at"]
+        due = cand["due_date"]
+        posted_day = posted.date() if hasattr(posted, "date") else posted
+        due_day = due.date() if hasattr(due, "date") else due
+        days_late = abs((posted_day - due_day).days)
         date_score = max(0.0, 1.0 - days_late / 90.0)
 
         ref_tokens = [

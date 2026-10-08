@@ -72,7 +72,8 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     setLoading(true)
     setError(null)
     try {
-      const profile = await api.get<Me>('/me')
+      // The profile lives under the identity router (GET /api/v1/users/me).
+      const profile = await api.get<Me>('/users/me')
       setMe(profile)
 
       // GET /companies returns a bare JSON array, not a page envelope.

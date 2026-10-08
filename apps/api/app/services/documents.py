@@ -151,7 +151,7 @@ _DOC_SELECT = """
            d.related_id, d.checksum_sha256, d.ai_processing_state, d.created_at, d.updated_at,
            u.public_id AS owner_public_id,
            NULLIF(TRIM(u.first_name || ' ' || u.last_name), '') AS owner_name,
-           v.version_no, v.file_name, v.content_type, v.byte_size, v.storage_path
+           v.version_no, v.file_name, v.mime_type AS content_type, v.byte_size, v.storage_path
       FROM public.documents d
       LEFT JOIN public.users u ON u.id = d.owner_user_id
       LEFT JOIN public.document_versions v ON v.id = d.current_version_id

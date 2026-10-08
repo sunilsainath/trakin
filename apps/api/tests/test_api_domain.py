@@ -89,30 +89,22 @@ EXPECTED_SERVER_ERRORS: dict[str, str] = {
     # bank-accounts/connections, GET/GET/POST/POST/POST leave, GET
     # ai/workforce-intelligence, POST ai/timesheet-intelligence (D7);
     # GET contracts/{id}/versions (D8).
+    # Removed 2026-10-09 (0017 metadata migration + lateral-alias fix): GET/GET
+    # projects, GET/GET sows, GET sows/{id}/versions, POST sows/{id}/terminate,
+    # GET/GET contracts, GET contracts/{id}/roles, POST contracts/{id}/approvals,
+    # POST contracts/{id}/close (D1 lateral alias; D9 metadata).
     # ---- D1 (still failing)
-    "GET /api/v1/projects": "D1 code.py:263 list_projects -> c.name",
-    "GET /api/v1/projects/{project_id}": "D1 code.py:287 get_project -> c.name",
-    "GET /api/v1/sows": "D1 code.py:1036 list_sows -> cp.name",
-    "GET /api/v1/sows/{sow_id}": "D1 code.py:987 get_sow -> cp.name",
-    "GET /api/v1/sows/{sow_id}/versions": "D1 code.py:987 get_sow (called by sow_versions)",
-    "POST /api/v1/sows/{sow_id}/terminate": "D1 code.py:1405 transition_sow -> get_sow",
+    "GET /api/v1/projects/{project_id}": "D1 code.py:287 get_project single-read (list heals, read still 500s)",
     "GET /api/v1/invoices": "D1 invoicing.py:318 list_invoices -> cp.name",
     "GET /api/v1/invoices/{invoice_id}": "D1 invoicing.py:139 get_invoice -> cp.name",
     "POST /api/v1/invoices/{invoice_id}/credit-notes": "D1 invoicing.py get_invoice -> cp.name",
     "POST /api/v1/invoices/{invoice_id}/validate": "D1 invoicing.py:139 get_invoice",
     "GET /api/v1/dashboard": 'D1 dashboard.py:217 company_dashboard -> "name"',
-    # ---- D7 (still failing)
-    "GET /api/v1/timesheets/{timesheet_id}": "D7 work.py:563 get_timesheet",
+    # ---- D7 (still failing; list-documents, single-timesheet and
+    # update-assignment healed 2026-10-09 via mime_type/content fixes)
     "GET /api/v1/assignments": "D7 work.py:146 list_assignments",
-    "PATCH /api/v1/assignments/{assignment_id}": "D7 work.py:306 get_assignment",
-    "GET /api/v1/documents": "D7 documents.py:195 list_documents",
     "GET /api/v1/documents/{document_id}": "D7 documents.py:218 get_document",
-    # ---- D9
-    "GET /api/v1/contracts": "D9 contracts.py:373 list_contracts -> c.metadata",
-    "GET /api/v1/contracts/{contract_id}": "D9 contracts.py:310 get_contract",
-    "GET /api/v1/contracts/{contract_id}/roles": "D9 contracts.py:1470 contract_roles",
-    "POST /api/v1/contracts/{contract_id}/approvals/{step_no}": "D9 contracts.py:1050 approve_step",
-    "POST /api/v1/contracts/{contract_id}/close": "D9 contracts.py:1329 close_contract",
+    # ---- D9 (only terminate still 500s; the rest healed with 0017)
     "POST /api/v1/contracts/{contract_id}/terminate": (
         "D9 contracts.py:1253 terminate_contract (ends in get_contract)"
     ),

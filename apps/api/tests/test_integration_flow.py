@@ -592,7 +592,8 @@ async def test_billing_preview_reports_hours_times_contract_rate(conn, skeleton,
     assert line["currency"] == "USD"
 
 
-@pytest.mark.xfail(strict=True, reason=D7_PROFILE_COLUMNS)
+# Formerly xfail D7: verified 2026-10-09 -- billable_timesheets runs; the test
+# also deletes the draft sheet first (one sheet per user/assignment/period).
 async def test_billable_timesheets_only_selects_unbilled_approved_work(
     conn, skeleton, tenants
 ) -> None:
@@ -611,6 +612,14 @@ async def test_billable_timesheets_only_selects_unbilled_approved_work(
             period_end=PERIOD_END,
         )
         == []
+    )
+
+    # One sheet per (user, assignment, period): the draft is removed before the
+    # approved sheet for the same period is built, so the unique constraint
+    # proves nothing here and trips on nothing either.
+    await conn.execute(
+        text("DELETE FROM public.timesheets WHERE id = CAST(:i AS uuid)"),
+        {"i": draft["id"]},
     )
 
     approved = await _approved_sheet(conn, skeleton, tenant, user=tenants["worker"].user_id)
@@ -748,9 +757,9 @@ async def test_get_invoice_reads_the_invoice_back(conn, skeleton, tenants) -> No
     assert len(read["items"]) == 1
 
 
-@pytest.mark.xfail(strict=True, reason=D1_COMPANY_NAME)
+# Formerly xfail D1: verified 2026-10-09 -- _PROJECT_SELECT lateral alias fixed.
 async def test_get_project_and_list_projects_return_the_project(conn, skeleton, tenants) -> None:
-    """DEFECT D1: ``code.get_project`` and ``code.list_projects`` cannot execute."""
+    """``code.get_project`` and ``code.list_projects`` return the project."""
     from app.services import code
 
     tenant = tenants["admin"]
@@ -774,9 +783,9 @@ async def test_get_project_and_list_projects_return_the_project(conn, skeleton, 
     assert public_id in {row["public_id"] for row in listed}
 
 
-@pytest.mark.xfail(strict=True, reason=D1_COMPANY_NAME)
+# Formerly xfail D1: verified 2026-10-09 -- contracts.metadata added (0017).
 async def test_get_contract_and_list_contracts_return_the_contract(conn, skeleton, tenants) -> None:
-    """DEFECT D1: ``contracts.get_contract`` / ``list_contracts`` cannot execute."""
+    """``contracts.get_contract`` / ``list_contracts`` return the contract."""
     from app.services import contracts
 
     tenant = tenants["admin"]
@@ -803,9 +812,9 @@ async def test_get_contract_and_list_contracts_return_the_contract(conn, skeleto
     assert public_id in {row["public_id"] for row in listed}
 
 
-@pytest.mark.xfail(strict=True, reason=D1_COMPANY_NAME)
+# Formerly xfail D1: verified 2026-10-09 -- suggest_matches date arithmetic fixed.
 async def test_get_payment_and_suggest_matches_return_rows(conn, skeleton, tenants) -> None:
-    """DEFECT D1: ``payments.get_payment`` and ``suggest_matches`` cannot execute."""
+    """``payments.get_payment`` and ``suggest_matches`` return rows."""
     from app.services import payments
 
     tenant = tenants["admin"]
@@ -899,9 +908,9 @@ async def test_the_database_refuses_an_entry_on_a_locked_timesheet(conn, skeleto
     assert entries == 0
 
 
-@pytest.mark.xfail(strict=True, reason=D4_SOW_ROLES)
+# Formerly xfail D4: verified 2026-10-09 -- passes (metadata migration unblocked it).
 async def test_create_sow_attaches_the_roles_it_was_given(conn, skeleton, tenants) -> None:
-    """DEFECT D4: ``code.create_sow`` binds an ``R...`` identifier as a uuid."""
+    """``code.create_sow`` attaches the roles it was given."""
     from app.services import code
 
     tenant = tenants["admin"]
@@ -1771,14 +1780,10 @@ async def test_audit_is_written_for_actions_the_service_can_complete(
     assert row["request_id"] == "flow"
 
 
-@pytest.mark.xfail(strict=True, reason=D7_PROFILE_COLUMNS)
+# Formerly xfail D7: verified 2026-10-09 -- full chain runs end to end.
 async def test_audit_rows_exist_for_the_key_actions(conn, skeleton, tenants) -> None:
     """``contract.created``, ``invoice.generated``, ``payment.recorded``,
     ``reconciliation.accepted``.
-
-    ``create_contract`` writes its audit row before the broken read, but
-    ``generate_invoice`` never gets that far: DEFECT D7 stops it in
-    ``preview_invoice``.
     """
     from app.services import contracts, invoicing, payments
 
@@ -1843,7 +1848,7 @@ async def test_audit_rows_exist_for_the_key_actions(conn, skeleton, tenants) -> 
 # =============================================================================
 # reconciliation
 # =============================================================================
-@pytest.mark.xfail(strict=True, reason=D1_COMPANY_NAME)
+# Formerly xfail D1: verified 2026-10-09 -- reconcile path runs to PAID.
 async def test_reconciliation_settles_the_invoice_and_matches_the_transaction(
     conn, skeleton, tenants
 ) -> None:

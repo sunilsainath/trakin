@@ -26,18 +26,35 @@ const nextConfig = {
             key: 'Content-Security-Policy',
             value: [
               "default-src 'self'",
-              // Next.js injects the build's own hashes; 'unsafe-inline' on
-              // styles only, never on scripts.
-              "script-src 'self' 'nonce-{{nonce}}' 'strict-dynamic'",
+              // NOTE: a previous revision shipped
+              //   script-src 'self' 'nonce-{{nonce}}' 'strict-dynamic'
+              // but no middleware ever substituted {{nonce}}, so browsers saw a
+              // literal invalid nonce and blocked every Next.js inline bootstrap
+              // script (React never hydrated; login/dashboard stayed on their
+              // loading fallbacks). Framework-injected scripts cannot carry a
+              // per-request nonce without middleware + layout wiring, so until
+              // that hardening lands (TODO: real nonce middleware with
+              // 'strict-dynamic' for production), scripts allow 'unsafe-inline'.
+              // 'unsafe-eval' is dev-only: webpack HMR needs it, production
+              // does not.
+              "script-src 'self' 'unsafe-inline'" +
+                (process.env.NODE_ENV === 'production' ? '' : " 'unsafe-eval'"),
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob: https:",
               "font-src 'self' data:",
-              "connect-src 'self' " + (process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000'),
+              // The browser calls Supabase Auth directly (sign-in, session
+              // refresh), so its host must be an allowed connection target in
+              // addition to the API.
+              "connect-src 'self' " +
+                (process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000') +
+                ' ' +
+                (process.env.NEXT_PUBLIC_SUPABASE_URL ?? ''),
               "frame-ancestors 'none'",
               "base-uri 'self'",
               "form-action 'self'",
               "object-src 'none'",
-              "upgrade-insecure-requests",
+              // Local dev is plain http; forcing https upgrades breaks it.
+              ...(process.env.NODE_ENV === 'production' ? ['upgrade-insecure-requests'] : []),
             ].join('; '),
           },
         ],

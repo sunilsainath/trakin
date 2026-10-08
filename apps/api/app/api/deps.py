@@ -116,7 +116,7 @@ async def require_user(
     request_id = getattr(request.state, "request_id", "")
 
     async with request_session(user_id=None, company_id=None, request_id=request_id) as conn:
-        user_id = uuid.UUID(await assert_account_active(conn, auth.auth_id))
+        user_id = uuid.UUID(await assert_account_active(conn, auth.auth_id, email=auth.email))
         await set_identity(conn, user_id=user_id, company_id=None, request_id=request_id)
 
         user_id_var.set(str(user_id))
@@ -147,7 +147,7 @@ async def require_company(
     request_id = getattr(request.state, "request_id", "")
 
     async with request_session(user_id=None, company_id=None, request_id=request_id) as conn:
-        user_id = uuid.UUID(await assert_account_active(conn, auth.auth_id))
+        user_id = uuid.UUID(await assert_account_active(conn, auth.auth_id, email=auth.email))
 
         if not x_company_id:
             await set_identity(conn, user_id=user_id, company_id=None, request_id=request_id)

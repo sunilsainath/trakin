@@ -91,6 +91,9 @@ _ASSIGNMENT_SELECT = """
 
 def _assignment_from_row(row: Any) -> dict[str, Any]:
     data = dict(row)
+    # Assignments are addressed by internal uuid; the response schema declares
+    # id as a string, so stringify it (same fix as _timesheet_from_row).
+    data["id"] = str(data["id"])
     data["user_id"] = data.pop("user_public_id")
     data["contract_id"] = data.pop("contract_public_id")
     data["project_id"] = data.pop("project_public_id")
@@ -475,6 +478,10 @@ _TIMESHEET_SELECT = """
 
 def _timesheet_from_row(row: Any) -> dict[str, Any]:
     data = dict(row)
+    # Assignments are addressed by internal uuid in this API (see the sweep's
+    # world fixture), but the response schema declares a string: stringify it
+    # instead of leaking a UUID object into response validation.
+    data["assignment_id"] = str(data["assignment_id"])
     data["user_id"] = data.pop("user_public_id")
     data["contract_id"] = data.pop("contract_public_id")
     data["project_id"] = data.pop("project_public_id")

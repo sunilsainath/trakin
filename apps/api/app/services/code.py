@@ -119,7 +119,7 @@ _PROJECT_SELECT = """
            ou.public_id AS owner_public_id,
            NULLIF(TRIM(ou.first_name || ' ' || ou.last_name), '') AS owner_name,
            cp.public_id AS client_company_id,
-           COALESCE(cp.display_name, cp.legal_name) AS client_name,
+           cp.name AS client_name,
            COALESCE(pr.role_count, 0)      AS role_count,
            COALESCE(pr.open_role_count, 0)  AS open_role_count,
            COALESCE(sw.sow_count, 0)        AS sow_count,

@@ -70,10 +70,11 @@ async def project_dashboard(
     stored = await conn.execute(
         text(
             """
-            SELECT public_id, insight_type, severity, title, summary, data, created_at
+            SELECT public_id, insight_type, severity, title, summary,
+                   data_snapshot AS data, created_at
               FROM public.ai_insights
              WHERE company_id = :cid AND entity_type = 'PROJECT' AND entity_id = CAST(:pid AS uuid)
-               AND (expires_at IS NULL OR expires_at > now())
+               AND (valid_until IS NULL OR valid_until > now())
              ORDER BY created_at DESC LIMIT 20
             """
         ),

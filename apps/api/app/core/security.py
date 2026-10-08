@@ -155,7 +155,9 @@ class TokenVerifier:
 
 
 # --------------------------------------------------------------------- account
-async def assert_account_active(db: Any, auth_id: str) -> str:
+async def assert_account_active(
+    db: Any, auth_id: str, *, email: str = "", first_name: str = ""
+) -> str:
     """Resolve `auth_id` to a platform user id and confirm the account is usable.
 
     Raises rather than returning a partially-valid identity, so a suspended or
@@ -182,7 +184,7 @@ async def assert_account_active(db: Any, auth_id: str) -> str:
 
     if row is None:
         # Provisioned on first authenticated request, mirroring auth.users.
-        return await provision_user(db, auth_id)
+        return await provision_user(db, auth_id, email=email, first_name=first_name)
 
     if row["status"] == "SUSPENDED":
         raise AccountDisabledError("This account has been suspended.")

@@ -512,13 +512,10 @@ async def create_contract(
         .first()
     )
 
-    contract_id = uuid.UUID(
-        str(
-            await resolve_scoped(
-                conn, "contracts", str(row["public_id"]), company_id, columns="id"
-            )["id"]
-        )
+    resolved = await resolve_scoped(
+        conn, "contracts", str(row["public_id"]), company_id, columns="id"
     )
+    contract_id = uuid.UUID(str(resolved["id"]))
 
     await _insert_contract_roles(
         conn,
