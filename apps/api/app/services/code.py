@@ -1399,6 +1399,22 @@ async def transition_sow(
             ),
             {"actor": actor_user_id, "rid": before["id"]},
         )
+        # The SOW's commercial scope becomes billable work here: one DRAFT
+        # contract per SOW, carrying every priced role. The generator is
+        # idempotent, so re-activating an EXPIRED SOW creates nothing new, and a
+        # failure rolls the approval back with it rather than leaving an ACTIVE
+        # SOW whose contracts silently never appeared.
+        if before.get("auto_generate_contracts"):
+            from app.services.contracts import generate_contracts_for_sow
+
+            await generate_contracts_for_sow(
+                conn,
+                company_id=company_id,
+                sow_id=before["id"],
+                actor_user_id=actor_user_id,
+                request_id=request_id,
+                ip_address=ip_address,
+            )
 
     await audit.record(
         conn,

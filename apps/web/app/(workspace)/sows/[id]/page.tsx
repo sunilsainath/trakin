@@ -500,8 +500,9 @@ function ContractsTab({ sow }: { sow: Sow }) {
       <CardHeader>
         <CardTitle>Contracts from this SOW</CardTitle>
         <CardDescription>
-          Contracts are generated from an approved SOW, one per role or counterparty as
-          configured.
+          Contracts are generated from an approved SOW: one contract per SOW,
+          addressed to its counterparty and carrying every priced role.
+          Approving again never duplicates it.
         </CardDescription>
       </CardHeader>
       <CardContent>

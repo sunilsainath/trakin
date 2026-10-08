@@ -565,6 +565,143 @@ async def create_contract(
     return await get_contract(conn, company_id=company_id, public_id=str(row["public_id"]))
 
 
+async def generate_contracts_for_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    sow_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> list[dict[str, Any]]:
+    """Create the DRAFT contract an activated SOW calls for.
+
+    One contract per SOW, addressed to the SOW's single counterparty and
+    carrying every priced role on the SOW's own commercial terms:
+
+    - a COMPANY SOW produces a COMPANY contract for the counterparty company;
+    - an INDIVIDUAL SOW produces an INDIVIDUAL contract for the person (§29),
+      so every real engagement gets contract, payment and audit behavior.
+
+    The generator is idempotent: a SOW that already has contracts gains no
+    more, so re-activating an EXPIRED SOW is safe. Contracts start DRAFT so the
+    normal send → accept → activate workflow, with its recorded acceptance,
+    still runs. A SOW with generation switched off yields nothing.
+    """
+    sow = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT s.public_id, s.title, s.sow_type, s.currency,
+                           s.billing_basis, s.billing_frequency, s.payment_terms_days,
+                           s.start_date, s.end_date, s.auto_generate_contracts,
+                           p.public_id AS project_public_id,
+                           COALESCE(cp.display_name, cp.legal_name) AS company_name,
+                           NULLIF(TRIM(cu.first_name || ' ' || cu.last_name), '')
+                               AS user_name
+                      FROM public.sows s
+                      JOIN public.projects p ON p.id = s.project_id
+                      LEFT JOIN public.companies cp ON cp.id = s.counterparty_company_id
+                      LEFT JOIN public.users cu ON cu.id = s.counterparty_user_id
+                     WHERE s.id = :sid AND s.company_id = :cid AND s.deleted_at IS NULL
+                    """
+                ),
+                {"sid": sow_id, "cid": company_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if sow is None:
+        raise ResourceNotFoundError("SOW not found.")
+    if not sow["auto_generate_contracts"]:
+        return []
+
+    existing = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT public_id FROM public.contracts
+                     WHERE sow_id = :sid AND deleted_at IS NULL
+                     ORDER BY created_at
+                    """
+                ),
+                {"sid": sow_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if existing:
+        return [
+            await get_contract(conn, company_id=company_id, public_id=str(r["public_id"]))
+            for r in existing
+        ]
+
+    roles = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT pr.public_id AS project_role_id, sr.quantity,
+                           sr.rate, sr.rate_type, sr.currency
+                      FROM public.sow_roles sr
+                      JOIN public.project_roles pr ON pr.id = sr.project_role_id
+                     WHERE sr.sow_id = :sid
+                     ORDER BY pr.public_id
+                    """
+                ),
+                {"sid": sow_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if not roles:
+        raise BusinessRuleViolationError(
+            "A SOW needs at least one project role before contracts can be generated.",
+            details={"reason": "SOW_HAS_NO_ROLES"},
+        )
+
+    label = sow["company_name"] or sow["user_name"] or "counterparty"
+    title = f"{sow['title']} — {label}"
+    if len(title) > 200:
+        title = title[:197] + "..."
+
+    created = await create_contract(
+        conn,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+        payload={
+            "project_id": str(sow["project_public_id"]),
+            "sow_id": str(sow["public_id"]),
+            "title": title,
+            "contract_type": "COMPANY" if sow["sow_type"] == "COMPANY" else "INDIVIDUAL",
+            "currency": sow["currency"],
+            "billing_basis": sow["billing_basis"],
+            "billing_frequency": sow["billing_frequency"],
+            "payment_terms_days": sow["payment_terms_days"],
+            "start_date": sow["start_date"],
+            "end_date": sow["end_date"],
+            "roles": [
+                {
+                    "project_role_id": str(r["project_role_id"]),
+                    "quantity": r["quantity"],
+                    "rate": r["rate"],
+                    "rate_type": r["rate_type"] or "HOURLY",
+                    "currency": r["currency"] or sow["currency"],
+                }
+                for r in roles
+            ],
+        },
+    )
+    return [created]
+
+
 async def _resolve_contract_roles(
     conn: AsyncConnection,
     *,
@@ -660,18 +797,39 @@ async def _insert_contract_parties(
 ) -> None:
     requested = payload.get("parties") or []
     if not requested:
-        # Default: our company plus the counterparty, as PRIMARY and COUNTERPARTY.
+        if counterparty_company is not None:
+            # Default: our company plus the counterparty, as PRIMARY and COUNTERPARTY.
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.contract_parties
+                      (contract_id, party_company_id, party_role)
+                    VALUES
+                      (:cid, :owner, 'PRIMARY'),
+                      (:cid, :counterparty, 'COUNTERPARTY')
+                    """
+                ),
+                {
+                    "cid": contract_id,
+                    "owner": owner_company,
+                    "counterparty": counterparty_company,
+                },
+            )
+            return
+        # Individual engagement (§29): the person is the counterparty. The old
+        # default wrote a NULL company here, which the party check constraint
+        # rightly refuses, so every individual contract failed to create.
         await conn.execute(
             text(
                 """
                 INSERT INTO public.contract_parties
-                  (contract_id, party_company_id, party_role)
+                  (contract_id, party_company_id, party_user_id, party_role)
                 VALUES
-                  (:cid, :owner, 'PRIMARY'),
-                  (:cid, :counterparty, 'COUNTERPARTY')
+                  (:cid, :owner, NULL, 'PRIMARY'),
+                  (:cid, NULL, :user, 'COUNTERPARTY')
                 """
             ),
-            {"cid": contract_id, "owner": owner_company, "counterparty": counterparty_company},
+            {"cid": contract_id, "owner": owner_company, "user": counterparty_user},
         )
         return
 

@@ -1919,3 +1919,171 @@ async def test_reconciliation_settles_the_invoice_and_matches_the_transaction(
         .all()
     )
     assert {"payment.recorded", "payment.allocated", "reconciliation.accepted"} <= actions
+
+
+# =============================================================================
+# sow -> contract auto-generation
+# =============================================================================
+async def _draft_sow_with_role(conn, skeleton, tenants, payload: dict[str, Any]) -> dict[str, Any]:
+    """A DRAFT SOW with one priced role, built through the real service."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    base: dict[str, Any] = {
+        "title": "Auto SOW",
+        "roles": [
+            {
+                "project_role_id": await _public(conn, "project_roles", skeleton.project_role),
+                "quantity": 2,
+                "rate": "80.0000",
+                "rate_type": "HOURLY",
+                "currency": "USD",
+            }
+        ],
+    }
+    base.update(payload)
+    return await code.create_sow(
+        conn,
+        company_id=tenant.company_id,
+        project_public_id=await _public(conn, "projects", skeleton.project),
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+        payload=base,
+    )
+
+
+async def _activate_sow(conn, tenants, sow_public_id: str) -> dict[str, Any]:
+    """Submit then approve a SOW, returning the ACTIVE representation."""
+    from app.services import code
+
+    tenant = tenants["admin"]
+    await code.transition_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow_public_id,
+        target="PENDING_APPROVAL",
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    return await code.transition_sow(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sow_public_id,
+        target="ACTIVE",
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+
+
+async def test_approving_a_company_sow_generates_its_contract(conn, skeleton, tenants) -> None:
+    """One COMPANY contract per approved SOW, carrying every priced role."""
+    from app.services import contracts
+
+    tenant = tenants["admin"]
+    role_public_id = await _public(conn, "project_roles", skeleton.project_role)
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {"counterparty_company_id": tenants["worker"].company_public_id},
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+
+    assert active["contract_count"] == 1
+    contract = await contracts.get_contract(
+        conn, company_id=tenant.company_id, public_id=active["contract_ids"][0]
+    )
+    assert contract["public_id"].startswith("C")
+    assert contract["status"] == "DRAFT"
+    assert contract["contract_type"] == "COMPANY"
+    assert contract["sow_id"] == sow["public_id"]
+    assert contract["counterparty_company_id"] == tenants["worker"].company_public_id
+    assert contract["counterparty_user_id"] is None
+    assert [r["project_role_id"] for r in contract["roles"]] == [role_public_id]
+    assert contract["roles"][0]["quantity"] == 2
+    assert str(contract["roles"][0]["rate"]) == "80.0000"
+
+
+async def test_approving_an_individual_sow_generates_an_individual_contract(
+    conn, skeleton, tenants
+) -> None:
+    """§29: an individual engagement gets its own contract, payment and audit trail."""
+    from app.services import contracts
+
+    tenant = tenants["admin"]
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {
+            "title": "Individual SOW",
+            "sow_type": "INDIVIDUAL",
+            "counterparty_user_id": tenants["worker"].user_public_id,
+        },
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+
+    assert active["contract_count"] == 1
+    contract = await contracts.get_contract(
+        conn, company_id=tenant.company_id, public_id=active["contract_ids"][0]
+    )
+    assert contract["contract_type"] == "INDIVIDUAL"
+    assert contract["counterparty_user_id"] == tenants["worker"].user_public_id
+    assert contract["counterparty_company_id"] is None
+    assert len(contract["roles"]) == 1
+    parties = contract["parties"]
+    assert {p["party_role"] for p in parties} == {"PRIMARY", "COUNTERPARTY"}
+
+
+async def test_generating_twice_does_not_duplicate_contracts(conn, skeleton, tenants) -> None:
+    """A repeated generation call (retry / duplicate delivery) is a no-op.
+
+    The state machine only enters ACTIVE once, and the row lock serialises
+    concurrent approvals, so this path is defence in depth: the generator
+    itself must never mint a second contract for one SOW.
+    """
+    from app.services import code, contracts
+
+    tenant = tenants["admin"]
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {"counterparty_company_id": tenants["worker"].company_public_id},
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+    assert active["contract_count"] == 1
+
+    repeat = await contracts.generate_contracts_for_sow(
+        conn,
+        company_id=tenant.company_id,
+        sow_id=sow["id"],
+        actor_user_id=tenant.user_id,
+        request_id="flow",
+        ip_address=None,
+    )
+    assert [c["public_id"] for c in repeat] == active["contract_ids"]
+
+    final = await code.get_sow(conn, company_id=tenant.company_id, public_id=sow["public_id"])
+    assert final["contract_count"] == 1
+    assert final["contract_ids"] == active["contract_ids"]
+
+
+async def test_sow_with_generation_disabled_creates_no_contract(conn, skeleton, tenants) -> None:
+    """auto_generate_contracts=false leaves activation contract-free."""
+    sow = await _draft_sow_with_role(
+        conn,
+        skeleton,
+        tenants,
+        {
+            "counterparty_company_id": tenants["worker"].company_public_id,
+            "auto_generate_contracts": False,
+        },
+    )
+    active = await _activate_sow(conn, tenants, sow["public_id"])
+    assert active["status"] == "ACTIVE"
+    assert active["contract_count"] == 0
+    assert active["contract_ids"] == []
