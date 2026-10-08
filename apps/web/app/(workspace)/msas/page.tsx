@@ -5,12 +5,12 @@ import { Handshake, Plus, RefreshCw, Send } from 'lucide-react'
 
 import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
-import { useCompanyMutation } from '@/hooks/use-mutations'
+import { uploadDocument, useCompanyMutation } from '@/hooks/use-mutations'
 import { formatDate, formatDateTime } from '@/lib/utils'
-import type { Company } from '@/lib/types'
 import type { Msa, Page as PageEnvelope } from '@/lib/domain-types'
+import type { SearchHit } from '@/lib/types'
 import { Button, Dialog, EmptyState, Input, Select } from '@/components/ui'
-import { Field } from '@/components/forms'
+import { DateInput, Field } from '@/components/forms'
 import { StatusBadge } from '@/components/badges'
 import { DataTable, type Column } from '@/components/data-table'
 import { PublicId } from '@/components/public-id'
@@ -319,6 +319,7 @@ export default function MsasPage() {
         onClose={() => setDetail(null)}
         canRequest={can('msas.request')}
         canReview={can('msas.review')}
+        canSubmit={can('msas.submit')}
         onAction={(kind, versionNo) =>
           setAction({ kind, id: detail?.public_id ?? '', label: detail ? `${detail.company_a_name} & ${detail.company_b_name}` : '', ...(versionNo ? { versionNo } : {}) })
         }
@@ -454,8 +455,11 @@ function OpenMsaDialog({
   companyPublicId: string | null
   onCreated: () => void
 }) {
-  const { companies } = useCompany()
+  const [query, setQuery] = React.useState('')
   const [counterparty, setCounterparty] = React.useState('')
+  const [counterpartyName, setCounterpartyName] = React.useState('')
+  const [results, setResults] = React.useState<SearchHit[]>([])
+  const [searching, setSearching] = React.useState(false)
   const [law, setLaw] = React.useState('')
   const [terms, setTerms] = React.useState('30')
   const [autoRenew, setAutoRenew] = React.useState('no')
@@ -465,7 +469,10 @@ function OpenMsaDialog({
 
   React.useEffect(() => {
     if (open) {
+      setQuery('')
       setCounterparty('')
+      setCounterpartyName('')
+      setResults([])
       setLaw('')
       setTerms('30')
       setAutoRenew('no')
@@ -474,6 +481,34 @@ function OpenMsaDialog({
       setError(null)
     }
   }, [open])
+
+  // Counterparty discovery: any company on the platform, not just the ones
+  // the caller already belongs to — otherwise an MSA with a new partner
+  // could never be started.
+  React.useEffect(() => {
+    const term = query.trim()
+    if (!open || term.length < 2) {
+      setResults([])
+      setSearching(false)
+      return
+    }
+    setSearching(true)
+    const timer = window.setTimeout(() => {
+      void api
+        .get<PageEnvelope<SearchHit>>(
+          `/search?q=${encodeURIComponent(term)}&types=COMPANY&limit=10`,
+          { companyPublicId },
+        )
+        .then((page) =>
+          setResults(
+            (page.data ?? []).filter((hit) => hit.public_id !== companyPublicId),
+          ),
+        )
+        .catch(() => setResults([]))
+        .finally(() => setSearching(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [query, open, companyPublicId])
 
   const create = useCompanyMutation<Msa>({
     context: { companyPublicId },
@@ -536,17 +571,68 @@ function OpenMsaDialog({
       }
     >
       <div className="space-y-4">
-        <Field label="Counterparty" required error={error ?? undefined} hint="Companies you share a connection with.">
-          <Select id="msa-counterparty" value={counterparty} onChange={(event) => setCounterparty(event.target.value)}>
-            <option value="">Choose a company</option>
-            {companies
-              .filter((company: Company) => company.public_id !== companyPublicId)
-              .map((company: Company) => (
-                <option key={company.public_id} value={company.public_id}>
-                  {company.display_name} ({company.public_id})
-                </option>
-              ))}
-          </Select>
+        <Field
+          label="Counterparty"
+          required
+          error={error ?? undefined}
+          hint="Search any company on the platform — not just the ones you belong to."
+        >
+          {counterparty ? (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm">
+              <span className="truncate font-medium">
+                {counterpartyName || counterparty}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setCounterparty('')
+                  setCounterpartyName('')
+                  setQuery('')
+                }}
+              >
+                Change
+              </Button>
+            </div>
+          ) : (
+            <>
+              <Input
+                id="msa-counterparty-search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Type at least 2 letters of the company name…"
+              />
+              {searching ? (
+                <p className="mt-1 text-xs text-muted-foreground">Searching…</p>
+              ) : query.trim().length >= 2 && results.length === 0 ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  No companies match that search.
+                </p>
+              ) : null}
+              {results.length > 0 ? (
+                <ul className="mt-2 divide-y divide-border/60 rounded-md border border-border">
+                  {results.map((hit) => (
+                    <li key={hit.public_id}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCounterparty(hit.public_id)
+                          setCounterpartyName(hit.title)
+                          setResults([])
+                        }}
+                        className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                      >
+                        <span className="truncate font-medium">{hit.title}</span>
+                        <span className="shrink-0 font-mono text-2xs text-subtle-foreground">
+                          {hit.public_id}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          )}
         </Field>
 
         <Field label="Governing law">
@@ -607,15 +693,18 @@ function MsaDetailDialog({
   onClose,
   canRequest,
   canReview,
+  canSubmit,
   onAction,
 }: {
   msa: Msa | null
   onClose: () => void
   canRequest: boolean
   canReview: boolean
+  canSubmit: boolean
   onAction: (kind: 'request' | 'activate' | 'reject' | 'terminate' | 'renew' | 'review_accept' | 'review_reject', versionNo?: number) => void
 }) {
   const { activeCompanyPublicId } = useCompany()
+  const [submitting, setSubmitting] = React.useState(false)
 
   const detail = useCompanyQuery<Msa>({
     companyPublicId: activeCompanyPublicId,
@@ -645,6 +734,11 @@ function MsaDetailDialog({
             <Button variant="outline" onClick={() => onAction('request')}>
               <Send aria-hidden />
               Ask for terms
+            </Button>
+          ) : null}
+          {data && canSubmit ? (
+            <Button variant="outline" onClick={() => setSubmitting(true)}>
+              Submit terms
             </Button>
           ) : null}
           {data && allowed.has('ACTIVE') && canReview ? (
@@ -786,6 +880,136 @@ function MsaDetailDialog({
           ) : null}
         </div>
       ) : null}
+      {data ? (
+        <SubmitTermsDialog
+          open={submitting}
+          onOpenChange={setSubmitting}
+          msaId={data.public_id}
+          companyPublicId={activeCompanyPublicId}
+          onSubmitted={() => {
+            setSubmitting(false)
+            void detail.refetch()
+          }}
+        />
+      ) : null}
+    </Dialog>
+  )
+}
+
+/**
+ * Submit terms for review: effective/expiration dates plus an optional signed
+ * MSA scan. The version starts as a draft the counterparty accepts or rejects;
+ * activation additionally requires an accepted version carrying both dates.
+ */
+function SubmitTermsDialog({
+  open,
+  onOpenChange,
+  msaId,
+  companyPublicId,
+  onSubmitted,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  msaId: string
+  companyPublicId: string | null
+  onSubmitted: () => void
+}) {
+  const [effective, setEffective] = React.useState('')
+  const [expiration, setExpiration] = React.useState('')
+  const [file, setFile] = React.useState<File | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const [busy, setBusy] = React.useState(false)
+
+  React.useEffect(() => {
+    if (open) {
+      setEffective('')
+      setExpiration('')
+      setFile(null)
+      setError(null)
+      setBusy(false)
+    }
+  }, [open ])
+
+  const submit = async () => {
+    if (effective && expiration && expiration < effective) {
+      setError('The expiration date cannot precede the effective date.')
+      return
+    }
+    setError(null)
+    setBusy(true)
+    try {
+      let documentId: string | undefined
+      if (file) {
+        const uploaded = await uploadDocument({
+          companyPublicId,
+          file,
+          title: file.name,
+          docType: 'MSA',
+          relatedType: 'MSA',
+          relatedPublicId: msaId,
+        })
+        documentId = uploaded.public_id
+      }
+      await api.post<Msa>(
+        `/msas/${msaId}/versions`,
+        {
+          ...(effective ? { effective_date: effective } : {}),
+          ...(expiration ? { expiration_date: expiration } : {}),
+          ...(documentId ? { document_id: documentId } : {}),
+        },
+        { companyPublicId },
+      )
+      notifySuccess('Terms submitted.', 'The counterparty can now review this version.')
+      onSubmitted()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The version could not be submitted.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Submit terms for review"
+      description="Upload the signed MSA scan and set its term. The version is reviewable immediately; activation still needs an accepted version with both dates."
+      footer={
+        <>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button loading={busy} onClick={() => void submit()}>
+            Submit version
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error ? (
+          <p role="alert" className="text-sm text-danger">
+            {error}
+          </p>
+        ) : null}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Effective date">
+            <DateInput id="msa-version-effective" value={effective} onChange={setEffective} />
+          </Field>
+          <Field label="Expiration date">
+            <DateInput id="msa-version-expiration" value={expiration} onChange={setExpiration} />
+          </Field>
+        </div>
+        <Field label="Signed MSA scan (optional)" hint="PDF or image. Stored as a company document linked to this agreement.">
+          <input
+            type="file"
+            accept="application/pdf,image/*"
+            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            className="text-sm"
+            aria-label="Signed MSA file"
+          />
+          {file ? <p className="mt-1 text-xs text-muted-foreground">Attached: {file.name}</p> : null}
+        </Field>
+      </div>
     </Dialog>
   )
 }

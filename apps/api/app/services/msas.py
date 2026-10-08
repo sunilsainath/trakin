@@ -376,9 +376,31 @@ async def create_version(
     effective_date: date | None = None,
     expiration_date: date | None = None,
     document_version_id: str | None = None,
+    document_id: str | None = None,
 ) -> dict[str, Any]:
     """Add a new draft version. Previous versions are superseded, never edited."""
     msa = await _msa_row(conn, public_id)
+    if document_version_id is None and document_id:
+        from app.services.lookup import resolve_scoped as _resolve
+
+        document = await _resolve(conn, "documents", document_id, company_id, columns="id")
+        latest = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT id::text AS id FROM public.document_versions"
+                        " WHERE document_id = CAST(:did AS uuid)"
+                        " ORDER BY version_no DESC LIMIT 1"
+                    ),
+                    {"did": document["id"]},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if latest is None:
+            raise ResourceNotFoundError("That document has no uploaded file yet.")
+        document_version_id = str(latest["id"])
     if str(msa["status"]) in {"ACTIVE"}:
         # A renewal is a new version; a live agreement is not rewritten.
         logger.info("msa_new_version_for_active", msa=public_id)

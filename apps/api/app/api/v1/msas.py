@@ -47,6 +47,9 @@ class CreateVersionBody(_Body):
     effective_date: str | None = None
     expiration_date: str | None = None
     document_version_id: str | None = None
+    # Public id of an MSA document (e.g. just uploaded). Resolved server-side
+    # to its latest version, so callers never need internal version uuids.
+    document_id: str | None = None
 
 
 class ReviewVersionBody(_Body):
@@ -142,6 +145,7 @@ async def create_version(
         if payload.expiration_date
         else None,
         document_version_id=payload.document_version_id,
+        document_id=payload.document_id,
     )
 
 
