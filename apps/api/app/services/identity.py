@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.errors import ResourceNotFoundError
+from app.core.errors import ResourceNotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.services import audit
 
@@ -220,6 +220,47 @@ async def get_profile(
         .all()
     )
 
+    data["education"] = (
+        (
+            await conn.execute(
+                text(
+                    """
+                SELECT institution, degree, field_of_study, start_date, end_date,
+                       grade, description
+                  FROM public.user_educations
+                 WHERE user_id = :uid AND visible
+                 ORDER BY end_date DESC NULLS LAST, start_date DESC NULLS LAST
+                """
+                ),
+                {"uid": target_user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    data["education"] = [dict(r) for r in data["education"]]
+
+    data["experience"] = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT company_name, title, employment_type, location,
+                           description, start_date, end_date, is_current
+                      FROM public.user_experiences
+                     WHERE user_id = :uid AND visible
+                     ORDER BY is_current DESC, end_date DESC NULLS LAST,
+                              start_date DESC
+                    """
+                ),
+                {"uid": target_user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    data["experience"] = [dict(r) for r in data["experience"]]
+
     data["connection_state"], data["mutual_connections"] = await _connection_state(
         conn, viewer_id, target_user_id
     )
@@ -246,11 +287,14 @@ async def _effective_visibility(
 ) -> str | None:
     """Resolve profile visibility, or None when the viewer may not see it.
 
-    Delegates to the SQL predicate so the API and the RLS policies agree.
+    Delegates to the SQL predicate so the API and the RLS policies agree. The
+    predicate is session-scoped (`app.current_user_id()` is the viewer), which
+    is why it is called with the target only: the request path has already set
+    the caller's identity via `set_identity`.
     """
     result = await conn.execute(
-        text("SELECT app.can_view_profile(:target, :viewer) AS allowed"),
-        {"target": target_id, "viewer": viewer_id},
+        text("SELECT app.can_view_profile(:target) AS allowed"),
+        {"target": target_id},
     )
     if not result.scalar():
         return None
@@ -259,8 +303,8 @@ async def _effective_visibility(
         return "PRIVATE"
 
     connected = await conn.execute(
-        text("SELECT app.can_view_connected(:target, :viewer) AS connected"),
-        {"target": target_id, "viewer": viewer_id},
+        text("SELECT app.can_view_connected(:target) AS connected"),
+        {"target": target_id},
     )
     if connected.scalar():
         return "CONNECTIONS"
@@ -506,3 +550,572 @@ async def set_notification_preferences(
         request_id=request_id,
     )
     return await get_notification_preferences(conn, user_id=user_id)
+
+
+# =============================================================================
+# career: education, experience, skills, work authorization
+# =============================================================================
+# Everything here is own-profile only: the caller addresses rows by internal
+# id, but every statement is scoped to the actor's user id, so one user can
+# never read or mutate another's career history. Education and experience are
+# professional data and ride along on the visible profile; visa status lives
+# in the protected table and is never exposed except through the masked
+# owner-only projection.
+
+_EDU_UPDATABLE = frozenset(
+    {
+        "institution",
+        "degree",
+        "field_of_study",
+        "start_date",
+        "end_date",
+        "grade",
+        "description",
+        "credential_id",
+        "visible",
+    }
+)
+
+_EXP_UPDATABLE = frozenset(
+    {
+        "company_name",
+        "title",
+        "employment_type",
+        "location",
+        "description",
+        "start_date",
+        "end_date",
+        "is_current",
+        "visible",
+    }
+)
+
+
+async def _own_row(
+    conn: AsyncConnection, table: str, row_id: uuid.UUID, user_id: uuid.UUID
+) -> dict[str, Any]:
+    """One career row belonging to the actor, or a 404 that reveals nothing."""
+    if table not in {"user_educations", "user_experiences"}:
+        raise ResourceNotFoundError("Unknown resource type.")
+    row = (
+        (
+            await conn.execute(
+                text(
+                    f"SELECT * FROM public.{table} "  # noqa: S608 - allowlisted table
+                    "WHERE id = :rid AND user_id = :uid"
+                ),
+                {"rid": row_id, "uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Entry not found.")
+    return dict(row)
+
+
+async def list_education(conn: AsyncConnection, *, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT id::text AS id, institution, degree, field_of_study,
+                           start_date, end_date, grade, description, credential_id,
+                           is_verified, visible, created_at, updated_at
+                      FROM public.user_educations
+                     WHERE user_id = :uid
+                     ORDER BY end_date DESC NULLS LAST, start_date DESC NULLS LAST
+                    """
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_education(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    payload: dict[str, Any],
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.user_educations
+                      (user_id, institution, degree, field_of_study, start_date,
+                       end_date, grade, description, credential_id, visible)
+                    VALUES (:uid, :institution, :degree, :field_of_study, :start_date,
+                            :end_date, :grade, :description, :credential_id,
+                            COALESCE(:visible, true))
+                    RETURNING id
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "institution": payload["institution"],
+                    "degree": payload.get("degree"),
+                    "field_of_study": payload.get("field_of_study"),
+                    "start_date": payload.get("start_date"),
+                    "end_date": payload.get("end_date"),
+                    "grade": payload.get("grade"),
+                    "description": payload.get("description"),
+                    "credential_id": payload.get("credential_id"),
+                    "visible": payload.get("visible", True),
+                },
+            )
+        )
+        .mappings()
+        .first()
+    )
+    assert row is not None
+    await audit.record(
+        conn,
+        action="profile.education_added",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values={"institution": payload["institution"]},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await _own_row(conn, "user_educations", uuid.UUID(str(row["id"])), user_id)
+
+
+async def update_education(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    education_id: uuid.UUID,
+    changes: dict[str, Any],
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    before = await _own_row(conn, "user_educations", education_id, user_id)
+    updates = {k: v for k, v in changes.items() if k in _EDU_UPDATABLE and v is not None}
+    if updates:
+        assignments = ", ".join(f"{col} = :{col}" for col in updates)
+        await conn.execute(
+            text(
+                f"UPDATE public.user_educations SET {assignments} "  # noqa: S608 - allowlisted
+                "WHERE id = :rid AND user_id = :uid"
+            ),
+            {**updates, "rid": education_id, "uid": user_id},
+        )
+        await audit.record(
+            conn,
+            action="profile.education_updated",
+            resource_type="user",
+            resource_id=user_id,
+            actor_user_id=user_id,
+            old_values={k: before.get(k) for k in updates},
+            new_values=updates,
+            request_id=request_id,
+            ip_address=ip_address,
+        )
+    return await _own_row(conn, "user_educations", education_id, user_id)
+
+
+async def delete_education(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    education_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> None:
+    before = await _own_row(conn, "user_educations", education_id, user_id)
+    await conn.execute(
+        text("DELETE FROM public.user_educations WHERE id = :rid AND user_id = :uid"),
+        {"rid": education_id, "uid": user_id},
+    )
+    await audit.record(
+        conn,
+        action="profile.education_removed",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        old_values={"institution": before.get("institution")},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+
+
+async def list_experience(conn: AsyncConnection, *, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT id::text AS id, company_name, title, employment_type,
+                           location, description, start_date, end_date, is_current,
+                           visible, created_at, updated_at
+                      FROM public.user_experiences
+                     WHERE user_id = :uid
+                     ORDER BY is_current DESC, end_date DESC NULLS LAST, start_date DESC
+                    """
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_experience(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    payload: dict[str, Any],
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.user_experiences
+                      (user_id, company_name, title, employment_type, location,
+                       description, start_date, end_date, is_current, visible)
+                    VALUES (:uid, :company_name, :title, :employment_type, :location,
+                            :description, :start_date, :end_date,
+                            COALESCE(:is_current, false), COALESCE(:visible, true))
+                    RETURNING id
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "company_name": payload["company_name"],
+                    "title": payload["title"],
+                    "employment_type": payload.get("employment_type"),
+                    "location": payload.get("location"),
+                    "description": payload.get("description"),
+                    "start_date": payload["start_date"],
+                    "end_date": payload.get("end_date"),
+                    "is_current": payload.get("is_current", False),
+                    "visible": payload.get("visible", True),
+                },
+            )
+        )
+        .mappings()
+        .first()
+    )
+    assert row is not None
+    await audit.record(
+        conn,
+        action="profile.experience_added",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values={"company_name": payload["company_name"], "title": payload["title"]},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await _own_row(conn, "user_experiences", uuid.UUID(str(row["id"])), user_id)
+
+
+async def update_experience(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    experience_id: uuid.UUID,
+    changes: dict[str, Any],
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    before = await _own_row(conn, "user_experiences", experience_id, user_id)
+    updates = {k: v for k, v in changes.items() if k in _EXP_UPDATABLE and v is not None}
+    if updates:
+        assignments = ", ".join(f"{col} = :{col}" for col in updates)
+        await conn.execute(
+            text(
+                f"UPDATE public.user_experiences SET {assignments} "  # noqa: S608 - allowlisted
+                "WHERE id = :rid AND user_id = :uid"
+            ),
+            {**updates, "rid": experience_id, "uid": user_id},
+        )
+        await audit.record(
+            conn,
+            action="profile.experience_updated",
+            resource_type="user",
+            resource_id=user_id,
+            actor_user_id=user_id,
+            old_values={k: before.get(k) for k in updates},
+            new_values=updates,
+            request_id=request_id,
+            ip_address=ip_address,
+        )
+    return await _own_row(conn, "user_experiences", experience_id, user_id)
+
+
+async def delete_experience(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    experience_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> None:
+    before = await _own_row(conn, "user_experiences", experience_id, user_id)
+    await conn.execute(
+        text("DELETE FROM public.user_experiences WHERE id = :rid AND user_id = :uid"),
+        {"rid": experience_id, "uid": user_id},
+    )
+    await audit.record(
+        conn,
+        action="profile.experience_removed",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        old_values={"company_name": before.get("company_name"), "title": before.get("title")},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+
+
+async def list_my_skills(conn: AsyncConnection, *, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT s.id::text AS skill_id, s.name, s.category, us.proficiency,
+                           us.years_experience, us.visible
+                      FROM public.user_skills us
+                      JOIN public.skills s ON s.id = us.skill_id
+                     WHERE us.user_id = :uid
+                     ORDER BY us.proficiency DESC, s.name
+                    """
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_skill(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    payload: dict[str, Any],
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    """Attach a skill, creating the catalogue entry when it is genuinely new."""
+    name = str(payload.get("skill_name") or "").strip()
+    if not name:
+        raise ValidationError("Give the skill a name.", details={"field": "skill_name"})
+    proficiency = payload.get("proficiency", 3)
+    try:
+        proficiency = int(proficiency)
+    except (TypeError, ValueError):
+        raise ValidationError("Proficiency is 1-5.", details={"field": "proficiency"}) from None
+    if proficiency < 1 or proficiency > 5:
+        raise ValidationError("Proficiency is 1-5.", details={"field": "proficiency"})
+    skill = (
+        (
+            await conn.execute(
+                text(
+                    "INSERT INTO public.skills (name) VALUES (:name)"
+                    " ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name"
+                    " RETURNING id::text AS skill_id, name"
+                ),
+                {"name": name},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    assert skill is not None
+    await conn.execute(
+        text(
+            """
+            INSERT INTO public.user_skills (user_id, skill_id, proficiency, years_experience,
+                                            visible)
+            VALUES (:uid, CAST(:sid AS uuid), :proficiency, :years, COALESCE(:visible, true))
+            ON CONFLICT (user_id, skill_id) DO UPDATE
+               SET proficiency = EXCLUDED.proficiency,
+                   years_experience = COALESCE(
+                       EXCLUDED.years_experience, public.user_skills.years_experience
+                   ),
+                   visible = EXCLUDED.visible
+            """
+        ),
+        {
+            "uid": user_id,
+            "sid": skill["skill_id"],
+            "proficiency": proficiency,
+            "years": payload.get("years_experience"),
+            "visible": payload.get("visible", True),
+        },
+    )
+    await audit.record(
+        conn,
+        action="profile.skill_added",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values={"skill_name": skill["name"], "proficiency": proficiency},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return {
+        "skill_id": str(skill["skill_id"]),
+        "name": str(skill["name"]),
+        "proficiency": proficiency,
+    }
+
+
+async def update_skill(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    changes: dict[str, Any],
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if changes.get("proficiency") is not None:
+        proficiency = int(changes["proficiency"])
+        if proficiency < 1 or proficiency > 5:
+            raise ValidationError("Proficiency is 1-5.", details={"field": "proficiency"})
+        updates["proficiency"] = proficiency
+    if changes.get("years_experience") is not None:
+        updates["years_experience"] = changes["years_experience"]
+    if changes.get("visible") is not None:
+        updates["visible"] = bool(changes["visible"])
+    if not updates:
+        raise ValidationError("Nothing to update.", details={"reason": "EMPTY_UPDATE"})
+    result = await conn.execute(
+        text(
+            "UPDATE public.user_skills SET proficiency = COALESCE(:proficiency, proficiency),"
+            " years_experience = COALESCE(:years, years_experience),"
+            " visible = COALESCE(:visible, visible)"
+            " WHERE user_id = :uid AND skill_id = CAST(:sid AS uuid)"
+            " RETURNING skill_id::text AS skill_id"
+        ),
+        {
+            "proficiency": updates.get("proficiency"),
+            "years": updates.get("years_experience"),
+            "visible": updates.get("visible"),
+            "uid": user_id,
+            "sid": skill_id,
+        },
+    )
+    if result.mappings().first() is None:
+        raise ResourceNotFoundError("Skill not found.")
+    await audit.record(
+        conn,
+        action="profile.skill_updated",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        new_values=updates,
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    skills = await list_my_skills(conn, user_id=user_id)
+    for entry in skills:
+        if entry["skill_id"] == str(skill_id):
+            return entry
+    raise ResourceNotFoundError("Skill not found.")
+
+
+async def remove_skill(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> None:
+    deleted = await conn.execute(
+        text(
+            "DELETE FROM public.user_skills WHERE user_id = :uid AND skill_id = CAST(:sid AS uuid)"
+            " RETURNING skill_id"
+        ),
+        {"uid": user_id, "sid": skill_id},
+    )
+    if deleted.mappings().first() is None:
+        raise ResourceNotFoundError("Skill not found.")
+    await audit.record(
+        conn,
+        action="profile.skill_removed",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+
+
+async def get_visa(conn: AsyncConnection, *, user_id: uuid.UUID) -> dict[str, Any]:
+    """Owner-only work authorization. Never joined into profile responses."""
+    row = (
+        (
+            await conn.execute(
+                text(
+                    "SELECT visa_status, work_authorization FROM public.user_sensitive"
+                    " WHERE user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return {"visa_status": None, "work_authorization": None}
+    return {"visa_status": row["visa_status"], "work_authorization": row["work_authorization"]}
+
+
+async def update_visa(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    payload: dict[str, Any],
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    await conn.execute(
+        text(
+            """
+            INSERT INTO public.user_sensitive (user_id, visa_status, work_authorization)
+            VALUES (:uid, :status, :detail)
+            ON CONFLICT (user_id) DO UPDATE
+               SET visa_status = EXCLUDED.visa_status,
+                   work_authorization = EXCLUDED.work_authorization
+            """
+        ),
+        {
+            "uid": user_id,
+            "status": payload.get("visa_status"),
+            "detail": payload.get("work_authorization"),
+        },
+    )
+    await audit.record(
+        conn,
+        action="profile.visa_updated",
+        resource_type="user",
+        resource_id=user_id,
+        actor_user_id=user_id,
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await get_visa(conn, user_id=user_id)

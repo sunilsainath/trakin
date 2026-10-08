@@ -20,6 +20,7 @@ import {
 } from '@/components/filters'
 import { PageHeader, PageShell } from '@/components/page'
 import { ErrorState, LoadingTable, PermissionState, isPermissionError } from '@/components/query'
+import { CreateSowOpener } from './create-sow'
 
 /**
  * Every statement of work in the company.
@@ -154,9 +155,16 @@ export default function SowsPage() {
           title="Statements of work"
           description="What was promised, to whom, and at which roles and rates. Contracts are generated from an approved SOW."
           actions={
-            <Link href="/projects">
-              <Button variant="outline">Choose a project</Button>
-            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              <Link href="/projects">
+                <Button variant="outline">Choose a project</Button>
+              </Link>
+              {can('sows.create') ? (
+                <React.Suspense fallback={null}>
+                  <CreateSowOpener />
+                </React.Suspense>
+              ) : null}
+            </div>
           }
         />
 

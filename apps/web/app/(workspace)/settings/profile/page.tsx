@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui'
 import { SchemaForm, type FieldConfig } from '@/components/ui/schema-form'
 import { Alert } from '@/components/ui'
 import { ErrorState, LoadingBlock } from '@/components/query'
+import { CareerSection } from './career'
 
 const profileSchema = z.object({
   first_name: z.string().min(1, 'Enter your first name.').max(100),
@@ -160,6 +161,10 @@ export default function ProfileSettingsPage() {
             </button>
           </CardContent>
         </Card>
+      </div>
+
+      <div className="mt-4">
+        <CareerSection />
       </div>
     </PageShell>
   )

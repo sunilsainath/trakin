@@ -596,10 +596,15 @@ async def get_timesheet(
             await conn.execute(
                 text(
                     """
-                    SELECT step_no, status, required_permission, notes, requested_at, decided_at
-                      FROM public.timesheet_approvals
-                     WHERE timesheet_id = :tid
-                     ORDER BY step_no
+                    SELECT ta.step_no, ta.status, ta.required_permission, ta.notes,
+                           ta.requested_at, ta.decided_at,
+                           u.public_id AS approver_public_id,
+                           NULLIF(TRIM(u.first_name || ' ' || u.last_name), '')
+                               AS approver_name
+                      FROM public.timesheet_approvals ta
+                      LEFT JOIN public.users u ON u.id = ta.approver_user_id
+                     WHERE ta.timesheet_id = :tid
+                     ORDER BY ta.step_no
                     """
                 ),
                 {"tid": row["id"]},

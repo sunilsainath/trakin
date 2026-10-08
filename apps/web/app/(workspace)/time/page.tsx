@@ -559,6 +559,7 @@ function LeavePolicies() {
 function NewTimesheetDialog({ triggerLabel = 'New timesheet' }: { triggerLabel?: string }) {
   const { activeCompanyPublicId, can } = useCompany()
   const [open, setOpen] = React.useState(false)
+  const [contractId, setContractId] = React.useState('')
   const [assignmentId, setAssignmentId] = React.useState('')
   const [periodStart, setPeriodStart] = React.useState('')
   const [periodEnd, setPeriodEnd] = React.useState('')
@@ -575,6 +576,7 @@ function NewTimesheetDialog({ triggerLabel = 'New timesheet' }: { triggerLabel?:
 
   React.useEffect(() => {
     if (open) {
+      setContractId('')
       setAssignmentId('')
       setPeriodStart('')
       setPeriodEnd('')
@@ -582,6 +584,24 @@ function NewTimesheetDialog({ triggerLabel = 'New timesheet' }: { triggerLabel?:
       setError(null)
     }
   }, [open])
+
+  const allAssignments = React.useMemo(
+    () => (assignments.data?.data ?? []).filter((assignment) => assignment.status === 'ACTIVE'),
+    [assignments.data],
+  )
+  const contractOptions = React.useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const assignment of allAssignments) {
+      if (!seen.has(assignment.contract_id)) {
+        seen.set(assignment.contract_id, assignment.contract_title ?? assignment.contract_id)
+      }
+    }
+    return [...seen.entries()]
+  }, [allAssignments])
+  const visibleAssignments = contractId
+    ? allAssignments.filter((assignment) => assignment.contract_id === contractId)
+    : allAssignments
+  const selectedAssignment = allAssignments.find((assignment) => assignment.id === assignmentId)
 
   const create = useCompanyMutation<Timesheet, void>({
     context: { companyPublicId: activeCompanyPublicId },
@@ -652,6 +672,33 @@ function NewTimesheetDialog({ triggerLabel = 'New timesheet' }: { triggerLabel?:
           className="space-y-4"
         >
           <Field
+            label="Contract"
+            required
+            error={error ?? undefined}
+            hint="Only contracts with an active assignment to you are listed."
+          >
+            {assignments.isPending ? (
+              <Skeleton className="h-10 w-full" />
+            ) : (
+              <Select
+                id="timesheet-contract"
+                value={contractId}
+                onChange={(event) => {
+                  setContractId(event.target.value)
+                  setAssignmentId('')
+                }}
+              >
+                <option value="">Choose a contract</option>
+                {contractOptions.map(([id, title]) => (
+                  <option key={id} value={id}>
+                    {title}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+
+          <Field
             label="Assignment"
             required
             error={error ?? undefined}
@@ -666,17 +713,32 @@ function NewTimesheetDialog({ triggerLabel = 'New timesheet' }: { triggerLabel?:
                 onChange={(event) => setAssignmentId(event.target.value)}
               >
                 <option value="">Choose an assignment</option>
-                {(assignments.data?.data ?? [])
-                  .filter((assignment) => assignment.status === 'ACTIVE')
-                  .map((assignment) => (
-                    <option key={assignment.id} value={assignment.id}>
-                      {assignment.project_name ?? 'Project'} ·{' '}
-                      {assignment.role_title ?? 'Unassigned role'} ({assignment.user_name ?? 'You'})
-                    </option>
-                  ))}
+                {visibleAssignments.map((assignment) => (
+                  <option key={assignment.id} value={assignment.id}>
+                    {assignment.project_name ?? 'Project'} ·{' '}
+                    {assignment.role_title ?? 'Unassigned role'} ({assignment.user_name ?? 'You'})
+                  </option>
+                ))}
               </Select>
             )}
           </Field>
+
+          {selectedAssignment ? (
+            <dl className="grid gap-x-6 gap-y-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-2xs font-medium uppercase tracking-wide text-subtle-foreground">
+                  Contract
+                </dt>
+                <dd>{selectedAssignment.contract_title ?? selectedAssignment.contract_id}</dd>
+              </div>
+              <div>
+                <dt className="text-2xs font-medium uppercase tracking-wide text-subtle-foreground">
+                  Role
+                </dt>
+                <dd>{selectedAssignment.role_title ?? 'Unassigned role'}</dd>
+              </div>
+            </dl>
+          ) : null}
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Period start" required>

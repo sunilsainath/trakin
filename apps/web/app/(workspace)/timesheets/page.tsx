@@ -6,7 +6,7 @@ import { Clock, Lock, Plus, RotateCcw, Send, Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useCompany } from '@/hooks/use-company'
 import { useCompanyMutation } from '@/hooks/use-mutations'
-import { formatCurrency, formatDate, formatHours } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime, formatHours } from '@/lib/utils'
 import type { Page as PageEnvelope, Timesheet, TimesheetEntry } from '@/lib/domain-types'
 import {
   Badge,
@@ -146,7 +146,7 @@ export default function TimesheetsPage() {
               onClick={() => setAction({ kind: 'submit', id: row.public_id, label: `${row.user_name ?? 'this person'} · ${formatDate(row.period_start)}` })}
             >
               <Send aria-hidden />
-              Submit
+              {row.status === 'REJECTED' ? 'Resubmit' : 'Submit'}
             </Button>
           ) : null}
           {['SUBMITTED', 'UNDER_REVIEW'].includes(row.status) && can('timesheets.approve') ? (
@@ -715,17 +715,28 @@ function TimesheetDialog({
           {data.approvals.length > 0 ? (
             <Card>
               <CardHeader>
-                <CardTitle>Approvals</CardTitle>
+                <CardTitle>Approval chain</CardTitle>
               </CardHeader>
               <CardContent>
-                <ul className="space-y-2">
+                <ul className="space-y-3">
                   {data.approvals.map((step, index) => (
-                    <li key={index} className="flex items-center justify-between gap-3 text-sm">
-                      <span>
-                        Step {String(step.step_no ?? index + 1)}
-                        {step.name ? ` · ${String(step.name)}` : ''}
-                      </span>
-                      <StatusBadge status={String(step.status ?? 'PENDING')} />
+                    <li key={index} className="space-y-0.5 text-sm">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-medium">
+                          Step {String(step.step_no ?? index + 1)}
+                          {step.name ? ` · ${String(step.name)}` : ''}
+                        </span>
+                        <StatusBadge status={String(step.status ?? 'PENDING')} />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {step.approver_name
+                          ? `Decided by ${String(step.approver_name)}`
+                          : 'Awaiting a reviewer'}
+                        {step.decided_at ? ` · ${formatDateTime(String(step.decided_at))}` : ''}
+                      </p>
+                      {step.notes ? (
+                        <p className="text-xs text-muted-foreground">“{String(step.notes)}”</p>
+                      ) : null}
                     </li>
                   ))}
                 </ul>

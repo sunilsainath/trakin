@@ -3559,3 +3559,82 @@ async def test_approving_a_multi_role_sow_generates_one_contract_per_role(
         ip_address=None,
     )
     assert repeat == []
+
+
+# =============================================================================
+# career history (§8)
+# =============================================================================
+async def test_career_history_crud_is_own_profile_only(conn, tenants) -> None:
+    """Education, experience and skills round-trip and stay owner-scoped."""
+    from app.core.errors import ResourceNotFoundError
+    from app.services import identity
+
+    admin, worker = tenants["admin"], tenants["worker"]
+
+    education = await identity.add_education(
+        conn,
+        user_id=admin.user_id,
+        payload={"institution": "IIT Bombay", "degree": "B.Tech", "field_of_study": "CS"},
+        request_id="flow",
+        ip_address=None,
+    )
+    assert education["institution"] == "IIT Bombay"
+
+    experience = await identity.add_experience(
+        conn,
+        user_id=admin.user_id,
+        payload={
+            "company_name": "Acme",
+            "title": "Engineer",
+            "start_date": utc_today(),
+            "is_current": True,
+        },
+        request_id="flow",
+        ip_address=None,
+    )
+    assert experience["company_name"] == "Acme"
+
+    skill = await identity.add_skill(
+        conn,
+        user_id=admin.user_id,
+        payload={"skill_name": "PostgreSQL", "proficiency": 5},
+        request_id="flow",
+        ip_address=None,
+    )
+    assert skill["name"] == "PostgreSQL"
+
+    # Another user's id addresses nothing: the row is not theirs.
+    with pytest.raises(ResourceNotFoundError):
+        await identity.delete_education(
+            conn,
+            user_id=worker.user_id,
+            education_id=uuid.UUID(str(education["id"])),
+            request_id="flow",
+            ip_address=None,
+        )
+
+    assert len(await identity.list_education(conn, user_id=admin.user_id)) == 1
+    assert len(await identity.list_experience(conn, user_id=admin.user_id)) == 1
+    assert len(await identity.list_my_skills(conn, user_id=admin.user_id)) == 1
+
+
+async def test_visa_status_is_owner_only(conn, tenants) -> None:
+    """Work authorization is stored and read back for its owner."""
+    from app.services import identity
+
+    admin = tenants["admin"]
+    saved = await identity.update_visa(
+        conn,
+        user_id=admin.user_id,
+        payload={"visa_status": "H1B", "work_authorization": "Approved I-140"},
+        request_id="flow",
+        ip_address=None,
+    )
+    assert saved["visa_status"] == "H1B"
+    fetched = await identity.get_visa(conn, user_id=admin.user_id)
+    assert fetched["work_authorization"] == "Approved I-140"
+    # The masked projection never carries the full work-authorization detail.
+    profile = await identity.get_profile(
+        conn, viewer_id=admin.user_id, target_user_id=admin.user_id
+    )
+    assert "work_authorization" not in profile

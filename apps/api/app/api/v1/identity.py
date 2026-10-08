@@ -12,10 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.api.deps import RequestContext, require_user
 from app.schemas.common import AckResponse, Page, build_page, clamp_limit
 from app.schemas.identity import (
+    EducationRequest,
+    ExperienceRequest,
     NotificationPreferenceItem,
     SearchHit,
+    SkillRequest,
     UpdateMeRequest,
     UserProfileResponse,
+    VisaRequest,
 )
 from app.services import audit, identity
 
@@ -136,6 +140,168 @@ async def set_my_notification_preferences(
         user_id=ctx.user_id,
         preferences=[item.model_dump() for item in payload],
         request_id=ctx.request_id,
+    )
+
+
+# --------------------------------------------------------------- career history
+# All own-profile only: the rows are the caller's, addressed by internal id, and
+# every statement is scoped to the actor. Visa status is protected data and is
+# only ever returned to its owner.
+@router.get("/me/education", summary="My education history")
+async def list_my_education(ctx_and_conn: UserContext) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await identity.list_education(conn, user_id=ctx.user_id)
+
+
+@router.post("/me/education", status_code=201, summary="Add an education entry")
+async def add_my_education(ctx_and_conn: UserContext, payload: EducationRequest) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.add_education(
+        conn,
+        user_id=ctx.user_id,
+        payload=payload.model_dump(),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.patch("/me/education/{entry_id}", summary="Update an education entry")
+async def update_my_education(
+    ctx_and_conn: UserContext, entry_id: uuid.UUID, payload: EducationRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.update_education(
+        conn,
+        user_id=ctx.user_id,
+        education_id=entry_id,
+        changes=payload.model_dump(exclude_unset=True),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.delete("/me/education/{entry_id}", response_model=AckResponse, summary="Remove an entry")
+async def delete_my_education(ctx_and_conn: UserContext, entry_id: uuid.UUID) -> AckResponse:
+    ctx, conn = ctx_and_conn
+    await identity.delete_education(
+        conn,
+        user_id=ctx.user_id,
+        education_id=entry_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+    return AckResponse(ok=True, message="Education entry removed.", request_id=ctx.request_id)
+
+
+@router.get("/me/experience", summary="My career history")
+async def list_my_experience(ctx_and_conn: UserContext) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await identity.list_experience(conn, user_id=ctx.user_id)
+
+
+@router.post("/me/experience", status_code=201, summary="Add a career entry")
+async def add_my_experience(
+    ctx_and_conn: UserContext, payload: ExperienceRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.add_experience(
+        conn,
+        user_id=ctx.user_id,
+        payload=payload.model_dump(),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.patch("/me/experience/{entry_id}", summary="Update a career entry")
+async def update_my_experience(
+    ctx_and_conn: UserContext, entry_id: uuid.UUID, payload: ExperienceRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.update_experience(
+        conn,
+        user_id=ctx.user_id,
+        experience_id=entry_id,
+        changes=payload.model_dump(exclude_unset=True),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.delete("/me/experience/{entry_id}", response_model=AckResponse, summary="Remove an entry")
+async def delete_my_experience(ctx_and_conn: UserContext, entry_id: uuid.UUID) -> AckResponse:
+    ctx, conn = ctx_and_conn
+    await identity.delete_experience(
+        conn,
+        user_id=ctx.user_id,
+        experience_id=entry_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+    return AckResponse(ok=True, message="Career entry removed.", request_id=ctx.request_id)
+
+
+@router.get("/me/skills", summary="My skills")
+async def list_my_skills(ctx_and_conn: UserContext) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await identity.list_my_skills(conn, user_id=ctx.user_id)
+
+
+@router.post("/me/skills", status_code=201, summary="Add a skill")
+async def add_my_skill(ctx_and_conn: UserContext, payload: SkillRequest) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.add_skill(
+        conn,
+        user_id=ctx.user_id,
+        payload=payload.model_dump(),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.patch("/me/skills/{skill_id}", summary="Update a skill")
+async def update_my_skill(
+    ctx_and_conn: UserContext, skill_id: uuid.UUID, payload: SkillRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.update_skill(
+        conn,
+        user_id=ctx.user_id,
+        skill_id=skill_id,
+        changes=payload.model_dump(exclude_unset=True),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.delete("/me/skills/{skill_id}", response_model=AckResponse, summary="Remove a skill")
+async def remove_my_skill(ctx_and_conn: UserContext, skill_id: uuid.UUID) -> AckResponse:
+    ctx, conn = ctx_and_conn
+    await identity.remove_skill(
+        conn,
+        user_id=ctx.user_id,
+        skill_id=skill_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+    return AckResponse(ok=True, message="Skill removed.", request_id=ctx.request_id)
+
+
+@router.get("/me/visa", summary="My work authorization (owner-only)")
+async def get_my_visa(ctx_and_conn: UserContext) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.get_visa(conn, user_id=ctx.user_id)
+
+
+@router.put("/me/visa", summary="Set my work authorization (owner-only)")
+async def set_my_visa(ctx_and_conn: UserContext, payload: VisaRequest) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await identity.update_visa(
+        conn,
+        user_id=ctx.user_id,
+        payload=payload.model_dump(),
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
     )
 
 

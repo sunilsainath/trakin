@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # --------------------------------------------------------------------- identity
 PublicId = str
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 class NotificationPreferenceItem(BaseModel):
@@ -87,6 +92,44 @@ class UpdateMeRequest(BaseModel):
     @classmethod
     def _upper_country(cls, v: str | None) -> str | None:
         return v.upper() if v else v
+
+
+class EducationRequest(_Strict):
+    institution: str = Field(..., min_length=1, max_length=200)
+    degree: str | None = Field(default=None, max_length=200)
+    field_of_study: str | None = Field(default=None, max_length=200)
+    start_date: dt.date | None = None
+    end_date: dt.date | None = None
+    grade: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=5000)
+    credential_id: str | None = Field(default=None, max_length=200)
+    visible: bool = True
+
+
+class ExperienceRequest(_Strict):
+    company_name: str = Field(..., min_length=1, max_length=200)
+    title: str = Field(..., min_length=1, max_length=200)
+    employment_type: (
+        Literal["FULL_TIME", "PART_TIME", "CONTRACT", "CONSULTANT", "INTERN"] | None
+    ) = None
+    location: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=5000)
+    start_date: dt.date
+    end_date: dt.date | None = None
+    is_current: bool = False
+    visible: bool = True
+
+
+class SkillRequest(_Strict):
+    skill_name: str = Field(..., min_length=1, max_length=100)
+    proficiency: int = Field(default=3, ge=1, le=5)
+    years_experience: Decimal | None = Field(default=None, ge=0)
+    visible: bool = True
+
+
+class VisaRequest(_Strict):
+    visa_status: str | None = Field(default=None, max_length=64)
+    work_authorization: str | None = Field(default=None, max_length=200)
 
 
 class SensitiveFieldRef(BaseModel):
