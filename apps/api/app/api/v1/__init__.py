@@ -36,10 +36,16 @@ from app.api.v1 import (
     insights as insights_module,
 )
 from app.api.v1 import (
+    messages as messages_module,
+)
+from app.api.v1 import (
     msas as msas_module,
 )
 from app.api.v1 import (
     search as search_module,
+)
+from app.api.v1 import (
+    social as social_module,
 )
 from app.api.v1 import (
     work as work_module,
@@ -68,6 +74,10 @@ api_router.include_router(msas_module.router)
 
 # Notifications, dashboard, AI domain intelligence
 api_router.include_router(insights_module.router)
+
+# Professional network + messaging
+api_router.include_router(social_module.router)
+api_router.include_router(messages_module.router)
 
 api_router.include_router(search_module.router)
 api_router.include_router(ai_module.router)

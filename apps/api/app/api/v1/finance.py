@@ -12,7 +12,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -1020,3 +1020,111 @@ async def scan_unmatched(ctx_and_conn: ReconciliationRead) -> dict[str, Any]:
         )
         suggested += len(candidates)
     return {"scanned": scanned, "suggestions": suggested}
+
+
+# =============================================================================
+# recurring schedules
+# =============================================================================
+@router.get("/payment-schedules", summary="List recurring payment schedules")
+async def list_schedules(
+    ctx_and_conn: PaymentsRead, limit: int = Query(50, ge=1, le=200)
+) -> dict[str, Any]:
+    from app.services import schedules as schedule_service
+
+    ctx, conn = ctx_and_conn
+    rows = await schedule_service.list_schedules(conn, company_id=company_scope(ctx), limit=limit)
+    return {"data": rows, "request_id": ctx.request_id}
+
+
+@router.post("/payment-schedules", status_code=201, summary="Create a recurring schedule")
+async def create_schedule(ctx_and_conn: PaymentsCreate, payload: dict[str, Any]) -> dict[str, Any]:
+    from app.services import schedules as schedule_service
+
+    ctx, conn = ctx_and_conn
+    return await schedule_service.create_schedule(
+        conn,
+        company_id=company_scope(ctx),
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        payload=payload,
+    )
+
+
+@router.get("/payment-schedules/{schedule_id}", summary="Read one schedule")
+async def read_schedule(ctx_and_conn: PaymentsRead, schedule_id: str) -> dict[str, Any]:
+    from app.services import schedules as schedule_service
+
+    ctx, conn = ctx_and_conn
+    return await schedule_service.get_schedule(
+        conn, company_id=company_scope(ctx), public_id=schedule_id
+    )
+
+
+@router.post("/payment-schedules/{schedule_id}/pause", summary="Pause a schedule")
+async def pause_schedule(ctx_and_conn: PaymentsCreate, schedule_id: str) -> dict[str, Any]:
+    from app.services import schedules as schedule_service
+
+    ctx, conn = ctx_and_conn
+    return await schedule_service.set_schedule_status(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=schedule_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        status="PAUSED",
+    )
+
+
+@router.post("/payment-schedules/{schedule_id}/cancel", summary="Cancel a schedule")
+async def cancel_schedule(ctx_and_conn: PaymentsCreate, schedule_id: str) -> dict[str, Any]:
+    from app.services import schedules as schedule_service
+
+    ctx, conn = ctx_and_conn
+    return await schedule_service.set_schedule_status(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=schedule_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        status="CANCELLED",
+    )
+
+
+@router.post("/payment-schedules/run-due", summary="Create today's due occurrences")
+async def run_due_schedules(ctx_and_conn: PaymentsCreate) -> dict[str, Any]:
+    from app.services import schedules as schedule_service
+
+    ctx, conn = ctx_and_conn
+    result = await schedule_service.run_due_schedules(
+        conn,
+        company_id=company_scope(ctx),
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+    )
+    return {**result, "request_id": ctx.request_id}
+
+
+# =============================================================================
+# processor webhooks (signature is the authentication: no user session)
+# =============================================================================
+@router.post("/payments/webhooks/{provider}", summary="Processor webhook ingest")
+async def processor_webhook(provider: str, request: Request) -> dict[str, Any]:
+    """Verify, persist idempotently, and fan out for background processing.
+
+    Unverifiable bodies are rejected before anything is stored; redeliveries
+    return the original receipt without re-processing.
+    """
+    from app.db.session import session_scope
+    from app.services import webhooks as webhook_service
+
+    raw = await request.body()
+    signature = request.headers.get("stripe-signature") or request.headers.get("x-signature")
+    async with session_scope() as conn:
+        return await webhook_service.ingest_processor_webhook(
+            conn,
+            provider=provider,
+            raw_body=raw,
+            signature=signature,
+            request_id=getattr(request.state, "request_id", ""),
+        )

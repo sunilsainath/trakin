@@ -15,6 +15,7 @@ import {
   Bell,
   Landmark,
   ArrowLeftRight,
+  MessageCircle,
   FileStack,
   Handshake,
   BookOpen,
@@ -60,6 +61,18 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { href: '/dashboard', label: 'Dashboard', icon: <LayoutDashboard aria-hidden /> },
       { href: '/feed', label: 'Activity', icon: <History aria-hidden /> },
+      {
+        href: '/network',
+        label: 'Network',
+        icon: <Users aria-hidden />,
+        permission: 'posts.read',
+      },
+      {
+        href: '/messages',
+        label: 'Messages',
+        icon: <MessageCircle aria-hidden />,
+        permission: 'messages.read',
+      },
       {
         href: '/companies',
         label: 'Companies',

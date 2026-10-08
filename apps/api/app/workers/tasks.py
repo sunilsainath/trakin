@@ -306,7 +306,8 @@ async def advance_payment_schedules() -> dict[str, int]:
                       ('PM' || upper(substr(md5(random()::text), 1, 6)), CAST(:cid AS uuid),
                        'PAYABLE', 'SCHEDULED', :amount, :ccy, :method, current_date,
                        'SCHEDULED', 'MANUAL',
-                       jsonb_build_object('schedule_public_id', :pid, 'source', 'recurring'),
+                       jsonb_build_object(
+                         'schedule_public_id', CAST(:pid AS text), 'source', 'recurring'),
                        :idem)
                     ON CONFLICT (idempotency_key) DO NOTHING
                     RETURNING id

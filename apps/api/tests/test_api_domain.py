@@ -830,12 +830,16 @@ async def test_openapi_document_is_well_formed(anon_api: httpx.AsyncClient) -> N
     assert len(operations) > 100
 
     # Every declared operation has a security-aware dependency: an operation that
-    # touches company data must not be anonymously reachable.
+    # touches company data must not be anonymously reachable. The processor
+    # webhook is the deliberate exception: its HMAC signature is the
+    # authentication, so it carries no bearer header by design.
     for path, methods in schema["paths"].items():
         for method, operation in methods.items():
             if method not in {"get", "post", "patch", "put", "delete"}:
                 continue
-            if any(seg in path for seg in ("/health", "/ready", "/version", "/auth/")):
+            if any(
+                seg in path for seg in ("/health", "/ready", "/version", "/auth/", "/webhooks/")
+            ):
                 continue
             assert "authorization" in str(operation.get("parameters", "")), (
                 f"{method.upper()} {path} declares no authorization header"
