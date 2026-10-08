@@ -358,6 +358,47 @@ async def invite_member(
     )
 
 
+@router.get(
+    "/companies/invitations/{token}",
+    response_model=dict[str, Any],
+    summary="Preview a company invitation",
+    dependencies=[Depends(rate_limited("invitations"))],
+)
+async def preview_invitation(ctx_and_conn: UserOnlyContext, token: str) -> dict[str, Any]:
+    """What the invitation offers, for the accept screen.
+
+    Authenticated: the invitee signs in first, then opens the link. The token
+    itself authorises the preview; the session only proves who is asking, so
+    the screen can warn when the signed-in email differs from the invited one.
+    """
+    _ctx, conn = ctx_and_conn
+    return await company_service.preview_invitation(conn, token=token)
+
+
+@router.post(
+    "/companies/invitations/accept",
+    response_model=dict[str, Any],
+    summary="Accept a company invitation",
+    dependencies=[Depends(rate_limited("invitations"))],
+)
+async def accept_invitation(
+    ctx_and_conn: UserOnlyContext, payload: dict[str, str]
+) -> dict[str, Any]:
+    """Redeem an invitation token as the signed-in user.
+
+    No company context: the invitee may belong to no company yet. The token
+    must have been issued to the caller's own email address, and a used or
+    expired token is rejected rather than reused.
+    """
+    ctx, conn = ctx_and_conn
+    return await company_service.accept_invitation(
+        conn,
+        token=(payload.get("token") or "").strip(),
+        user_id=ctx.user_id,
+        request_id=ctx.request_id,
+    )
+
+
 # ----------------------------------------------------------------------- roles
 @router.get(
     "/companies/current/roles", response_model=list[RoleResponse], summary="List company roles"

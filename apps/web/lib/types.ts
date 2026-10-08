@@ -119,6 +119,12 @@ export interface Company {
   public_id: string
   display_name: string
   legal_name: string | null
+  dba?: string | null
+  address_line1?: string | null
+  address_line2?: string | null
+  city?: string | null
+  region?: string | null
+  postal_code?: string | null
   country_code: string | null
   status: string
   default_currency: string

@@ -25,6 +25,7 @@ import { FilterBar, FilterInput, useDebouncedValue } from '@/components/filters'
 import { PageHeader, PageShell } from '@/components/page'
 import { ErrorState, LoadingTable, useCompanyQuery } from '@/components/query'
 import { notifyError, notifySuccess } from '@/components/toast'
+import { ReasonDialog } from '@/components/destructive'
 
 /**
  * The people directory for the active company.
@@ -157,6 +158,21 @@ function PeopleList() {
       hideBelow: 'lg',
       cell: (row) => (row.joined_at ? formatDate(row.joined_at) : '—'),
     },
+    ...(can('members.manage')
+      ? [
+          {
+            key: 'actions',
+            header: 'Actions',
+            cell: (row: Membership) => (
+              <MemberActions
+                member={row}
+                roles={roles.data ?? []}
+                companyPublicId={activeCompanyPublicId}
+              />
+            ),
+          },
+        ]
+      : []),
   ]
 
   if (members.isPending) return <LoadingTable rows={8} columns={5} />
@@ -325,7 +341,7 @@ function InviteDialog({ triggerLabel = 'Invite' }: { triggerLabel?: string }) {
     context: { companyPublicId: activeCompanyPublicId },
     mutationFn: (body) =>
       api.post<{ public_id: string; invitation_token: string }>(
-        '/companies/current/members',
+        '/companies/current/invitations',
         body,
         { companyPublicId: activeCompanyPublicId },
       ),
@@ -462,5 +478,150 @@ function InviteDialog({ triggerLabel = 'Invite' }: { triggerLabel?: string }) {
         </form>
       </Dialog>
     </>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Member actions                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Change a member's role or deactivate them. Both endpoints are server-gated
+ * on members.manage (and the last-SUPER_ADMIN guard lives in the database),
+ * so these buttons only appear for administrators in the first place.
+ */
+function MemberActions({
+  member,
+  roles,
+  companyPublicId,
+}: {
+  member: Membership
+  roles: Role[]
+  companyPublicId: string | null
+}) {
+  const [changing, setChanging] = React.useState(false)
+  const [deactivating, setDeactivating] = React.useState(false)
+
+  const deactivate = useCompanyMutation<unknown, string>({
+    context: { companyPublicId },
+    mutationFn: (reason) =>
+      api.delete(`/companies/current/members/${member.public_id}?reason=${encodeURIComponent(reason)}`, {
+        companyPublicId,
+      }),
+    invalidate: [['company', 'members']],
+    onSuccess: () => {
+      notifySuccess('Member deactivated.', 'Their history is retained for audit.')
+      setDeactivating(false)
+    },
+  })
+
+  return (
+    <div className="flex items-center justify-end gap-1">
+      <Button variant="ghost" size="sm" onClick={() => setChanging(true)}>
+        Change role
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="text-danger hover:bg-danger-soft"
+        onClick={() => setDeactivating(true)}
+      >
+        Deactivate
+      </Button>
+
+      {changing ? (
+        <ChangeRoleDialog
+          member={member}
+          roles={roles}
+          companyPublicId={companyPublicId}
+          onClose={() => setChanging(false)}
+        />
+      ) : null}
+
+      <ReasonDialog
+        open={deactivating}
+        onOpenChange={setDeactivating}
+        title={`Deactivate ${member.user.display_name}`}
+        description="Deactivation keeps every record they touched. It only ends their access, and the server records who did it and why."
+        confirmLabel="Deactivate member"
+        label="Reason for deactivation"
+        busy={deactivate.isPending}
+        error={deactivate.isError ? deactivate.error : null}
+        onConfirm={(reason) => deactivate.mutate(reason)}
+      />
+    </div>
+  )
+}
+
+function ChangeRoleDialog({
+  member,
+  roles,
+  companyPublicId,
+  onClose,
+}: {
+  member: Membership
+  roles: Role[]
+  companyPublicId: string | null
+  onClose: () => void
+}) {
+  const [roleKey, setRoleKey] = React.useState(member.role_key)
+
+  const change = useCompanyMutation<unknown, { role_key: string }>({
+    context: { companyPublicId },
+    mutationFn: (body) =>
+      api.patch(`/companies/current/members/${member.public_id}/role`, body, {
+        companyPublicId,
+      }),
+    invalidate: [['company', 'members']],
+    onSuccess: () => {
+      notifySuccess('Role updated.', `${member.user.display_name} is now ${roleKey}.`)
+      onClose()
+    },
+  })
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!roleKey || roleKey === member.role_key) {
+      onClose()
+      return
+    }
+    try {
+      await change.mutateAsync({ role_key: roleKey })
+    } catch (cause) {
+      notifyError(cause, 'The role could not be changed.')
+    }
+  }
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next) onClose()
+      }}
+      title={`Change ${member.user.display_name}'s role`}
+      description={`Currently ${member.role_name}. The change takes effect immediately and is audited.`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={change.isPending}>
+            Cancel
+          </Button>
+          <Button type="submit" form="change-role" loading={change.isPending}>
+            Save role
+          </Button>
+        </>
+      }
+    >
+      <form id="change-role" onSubmit={submit} className="space-y-4">
+        <Field label="Role" required>
+          <Select id="member-role" value={roleKey} onChange={(event) => setRoleKey(event.target.value)}>
+            {roles.map((role) => (
+              <option key={role.key} value={role.key}>
+                {role.name} ({role.key})
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </form>
+    </Dialog>
   )
 }

@@ -644,7 +644,7 @@ async def invite_member(
                         job_title = EXCLUDED.job_title,
                         message = EXCLUDED.message,
                         expires_at = now() + interval '7 days'
-                RETURNING public_id, expires_at
+                RETURNING id, public_id, expires_at
                 """
                 ),
                 {
@@ -666,7 +666,8 @@ async def invite_member(
         conn,
         action="invitation.sent",
         resource_type="company_invitation",
-        resource_id=uuid.UUID(str(row["public_id"])),
+        resource_id=uuid.UUID(str(row["id"])),
+        resource_public_id=str(row["public_id"]),
         company_id=company_id,
         actor_user_id=actor_user_id,
         new_values={"email": email, "role_key": role_key},
@@ -678,6 +679,62 @@ async def invite_member(
         "public_id": str(row["public_id"]),
         "invitation_token": raw_token,
         "expires_at": row["expires_at"],
+    }
+
+
+async def preview_invitation(
+    conn: AsyncConnection,
+    *,
+    token: str,
+) -> dict[str, Any]:
+    """Describe an invitation to its holder, without revealing anything else.
+
+    The token itself is the credential: it is unguessable, single-purpose and
+    already grants acceptance, so showing the invited email, company and role
+    to whoever presents it leaks nothing they could not already claim.
+    """
+    import hashlib
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                SELECT i.public_id, i.email::text AS email, i.status,
+                       i.expires_at, i.job_title,
+                       c.public_id AS company_public_id,
+                       c.display_name AS company_name,
+                       c.verification_state AS company_verification_state,
+                       r.key AS role_key, r.name AS role_name
+                  FROM public.company_invitations i
+                  JOIN public.companies c ON c.id = i.company_id
+                  JOIN public.company_roles r ON r.id = i.role_id
+                 WHERE i.token_hash = :hash
+                """
+                ),
+                {"hash": token_hash},
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+    if row is None:
+        raise ResourceNotFoundError("This invitation is not valid.")
+
+    return {
+        "public_id": str(row["public_id"]),
+        "email": row["email"],
+        "status": row["status"],
+        "expires_at": row["expires_at"],
+        "job_title": row["job_title"],
+        "company_public_id": row["company_public_id"],
+        "company_name": row["company_name"],
+        "company_verification_state": row["company_verification_state"],
+        "role_key": row["role_key"],
+        "role_name": row["role_name"],
     }
 
 

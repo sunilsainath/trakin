@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { Building2, Check } from 'lucide-react'
 
 import { api, createIdempotencyKey } from '@/lib/api'
+import { uploadFoundingW9 } from '@/hooks/use-mutations'
 import { useCompany } from '@/hooks/use-company'
 import { useCompanyMutation } from '@/hooks/use-mutations'
 import { formatDate } from '@/lib/utils'
@@ -263,6 +264,10 @@ const EMPTY: CompanyFormValues = {
 /**
  * Create a company.
  *
+ * A founding W-9 is uploaded first through the same intake the onboarding
+ * wizard uses; the server refuses to create the company without it, so the
+ * dialog requires the upload rather than letting the submit fail.
+ *
  * The idempotency key is generated per submit rather than per render: a retried
  * submit after a network failure must reuse the same key, but a fresh form
  * instance must not.
@@ -272,13 +277,34 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
   const [open, setOpen] = React.useState(false)
   const [values, setValues] = React.useState<CompanyFormValues>(EMPTY)
   const [errors, setErrors] = React.useState<Partial<Record<string, string>>>({})
+  const [w9, setW9] = React.useState<{ public_id: string; name: string } | null>(null)
+  const [uploadingW9, setUploadingW9] = React.useState(false)
+  const [w9Error, setW9Error] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     if (open) {
       setValues(EMPTY)
       setErrors({})
+      setW9(null)
+      setW9Error(null)
+      setUploadingW9(false)
     }
   }, [open])
+
+  const uploadW9 = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setUploadingW9(true)
+    setW9Error(null)
+    try {
+      const uploaded = await uploadFoundingW9(file)
+      setW9({ public_id: uploaded.public_id, name: file.name })
+    } catch (cause) {
+      setW9Error(cause instanceof Error ? cause.message : 'That upload did not work.')
+    } finally {
+      setUploadingW9(false)
+    }
+  }
 
   const create = useCompanyMutation<Company, CompanyFormValues>({
     context: { companyPublicId: activeCompanyPublicId },
@@ -293,6 +319,7 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
           default_currency: form.default_currency,
           city: form.city || undefined,
           region: form.region || undefined,
+          w9_document_public_id: w9?.public_id,
         },
         { companyPublicId: activeCompanyPublicId, idempotencyKey },
       )
@@ -310,6 +337,11 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
+
+    if (!w9) {
+      setW9Error('Upload a W-9 first — the company cannot be created without one.')
+      return
+    }
 
     const parsed = companySchema.safeParse(values)
     if (!parsed.success) {
@@ -342,19 +374,56 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
         open={open}
         onOpenChange={setOpen}
         title="Create a company"
-        description="You become its first super admin. Billing stays disabled until a W-9 has been uploaded and processed."
+        description="You become its first super admin. A founding W-9 is required: it is stored as the company's first document and billing stays disabled until it is processed."
         footer={
           <>
             <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
               Cancel
             </Button>
-            <Button type="submit" form="create-company" loading={create.isPending}>
+            <Button
+              type="submit"
+              form="create-company"
+              loading={create.isPending}
+              disabled={uploadingW9}
+            >
               Create company
             </Button>
           </>
         }
       >
         <form id="create-company" onSubmit={submit} className="space-y-4">
+          <Field
+            label="Founding W-9"
+            error={w9Error ?? undefined}
+            required
+            hint="PDF or image. Scanned, validated and stored privately before the company exists."
+          >
+            {w9 ? (
+              <p className="text-sm">
+                Attached: <span className="font-medium">{w9.name}</span>{' '}
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                  onClick={() => setW9(null)}
+                >
+                  Replace
+                </button>
+              </p>
+            ) : (
+              <Input
+                id="company-w9"
+                type="file"
+                accept="application/pdf,image/*"
+                disabled={uploadingW9}
+                onChange={(event) => void uploadW9(event)}
+                aria-invalid={Boolean(w9Error)}
+              />
+            )}
+            {uploadingW9 ? (
+              <p className="mt-1 text-xs text-muted-foreground">Uploading…</p>
+            ) : null}
+          </Field>
+
           <Field label="Legal name" error={errors.legal_name} required>
             <Input
               id="company-legal-name"
