@@ -54,6 +54,14 @@ jobs:
 
       - name: Import the application and count routes
         # A wiring error in an import graph shows up here rather than in production.
+        # Settings requires DATABASE_URL at import time; a placeholder is enough
+        # because nothing connects during collection, and no real credential is
+        # ever available to a pull request.
+        env:
+          DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/mytrakin'
+          SUPABASE_URL: 'https://placeholder.supabase.co'
+          SUPABASE_ANON_KEY: 'placeholder-anon-key'
+          SUPABASE_SERVICE_ROLE_KEY: 'placeholder-service-role-key'
         run: python -c "import app.main as m; print(len(m.app.openapi()['paths']), 'paths')"
 
   web:

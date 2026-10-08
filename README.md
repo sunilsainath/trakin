@@ -4,9 +4,12 @@ Production-grade, multi-tenant SaaS combining professional networking, workforce
 contracting (CODE), finance (billing + PAYMENTS) and an AI platform — all behind one
 authorization model and PostgreSQL Row Level Security.
 
-> **Status: Phase 1 — Foundation.** Schema, RLS, RBAC, authentication, design system, API
-> foundation, CI/CD and documentation are implemented. Module verticals land in later phases
-> per [`docs/architecture.md`](docs/architecture.md) §10. See [`docs/validation-report.md`](docs/validation-report.md).
+> **Status: implemented.** Multi-tenant RBAC + RLS, authentication (email verification,
+> sessions, MFA, Google OAuth), contracting (CODE), timesheets + leave, billing + invoicing,
+> payments + reconciliation, documents + MSA, social + messaging, global search and an AI
+> platform (gateway, RAG, agents) — with unit, integration, RLS security and API-sweep
+> suites, and CI running lint, types, unit tests, the web build and migrations-from-empty.
+> See [`docs/validation-report.md`](docs/validation-report.md) for the acceptance record.
 
 ## Repository layout
 
@@ -18,21 +21,18 @@ mytrakin/
 │   │   │   ├── api/         versioned routers (/api/v1)
 │   │   │   ├── core/        config, security, logging, errors, rate limiting, idempotency
 │   │   │   ├── db/          async engine, session identity (SET LOCAL), repositories
-│   │   │   ├── models/      SQLAlchemy ORM models mirroring migrations
 │   │   │   ├── schemas/     Pydantic v2 request/response contracts
 │   │   │   ├── services/    domain services (business rules live here)
 │   │   │   ├── ai/          AI gateway, providers, RAG, agents
 │   │   │   ├── integrations/ Plaid, payments, email, OCR, storage adapters
 │   │   │   └── workers/     Celery app and tasks
-│   │   ├── alembic/         forward-only migrations (mirrors supabase/migrations)
+│   │   ├── alembic/         env scaffolding (supabase/migrations is authoritative)
 │   │   └── tests/           unit, integration, permission and RLS security tests
 │   └── web/                 Next.js App Router + TypeScript + Tailwind + shadcn/ui
 ├── supabase/
-│   ├── migrations/          authoritative schema + RLS policies (SQL)
-│   ├── seed.sql             development-only reference data (permissions, roles)
-│   └── config.toml
+│   └── migrations/          authoritative schema + RLS policies (SQL)
 ├── docs/                    architecture, database, api, auth, rls, ai, security, ops
-├── infra/                   Azure Bicep / Terraform placeholders + container definitions
+├── infra/                   Azure Container Apps notes + Dockerfiles for api/web
 └── .github/workflows/       CI, security, CD
 ```
 
@@ -70,13 +70,13 @@ npm run dev
 
 API docs: <http://localhost:8000/docs> · ReDoc: <http://localhost:8000/redoc>
 
-### Using a real Supabase project
+### Using a real Postgres / Supabase project
+
+Set `DATABASE_URL` (and `DATABASE_ADMIN_URL` for schema changes) in `.env`, then:
 
 ```bash
-supabase login
-supabase link --project-ref "$SUPABASE_PROJECT_REF"
-supabase db push          # applies supabase/migrations
-supabase functions new verify-email   # see docs/authentication.md
+make db-apply   # apply pending migrations from supabase/migrations
+make db-verify  # assert the live database has every object the app depends on
 ```
 
 Set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` and `DATABASE_URL` in `.env`.
@@ -86,13 +86,14 @@ The service-role key is **server-only**: it must never appear in `apps/web` or a
 
 ```bash
 make help            # list all targets
-make db-reset        # drop + recreate local schema, apply migrations, load seed
-make db-diff         # verify migrations match models (CI gate)
-make test            # API test suite
+make db-reset        # drop + rebuild schema from supabase/migrations
+make test            # unit suites for both applications
 make test-security   # RLS / permission / IDOR suite
 make lint            # ruff + eslint
 make typecheck       # mypy + tsc
-make dev             # run API + web concurrently
+make check           # full local gate, no database required
+make api-dev         # run the FastAPI service with reload
+make web-dev         # run the Next.js dev server
 ```
 
 ## Documentation
