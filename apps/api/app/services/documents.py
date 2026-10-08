@@ -237,6 +237,49 @@ async def upload_w9_intake(
     return {"public_id": str(public_id), "status": "PROCESSING", "request_id": request_id}
 
 
+async def get_w9_intake_status(
+    conn: AsyncConnection,
+    *,
+    public_id: str,
+    owner_user_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Processing state of a founder's own unclaimed W-9 intake document.
+
+    Company-less by construction: the company does not exist yet, so the
+    owner — not a company context — authorises the read. Only the stage
+    states are exposed (scan, extraction, classification); never file bytes.
+    """
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                SELECT d.public_id, d.title, d.status, d.ai_processing_state,
+                       d.created_at,
+                       v.scan_status, v.scan_engine, v.extraction_state,
+                       v.ocr_confidence, v.mime_type AS content_type, v.byte_size
+                  FROM public.documents d
+                  LEFT JOIN public.document_versions v ON v.id = d.current_version_id
+                 WHERE d.public_id = :pid
+                   AND d.doc_type = 'W9'
+                   AND d.company_id IS NULL
+                   AND d.owner_user_id = :owner
+                   AND d.deleted_at IS NULL
+                """
+                ),
+                {"pid": public_id, "owner": owner_user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("W-9 intake document not found.")
+    data = dict(row)
+    data["owner_user_id"] = str(owner_user_id)
+    return data
+
+
 async def _storage() -> tuple[Any, str | None]:
     """The Supabase storage client, built lazily.
 

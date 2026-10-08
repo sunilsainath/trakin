@@ -20,7 +20,12 @@ from typing import Any
 
 import pytest
 
-from app.core.errors import BusinessRuleViolationError, ResourceNotFoundError, ValidationError
+from app.core.errors import (
+    BusinessRuleViolationError,
+    PermissionDeniedError,
+    ResourceNotFoundError,
+    ValidationError,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -464,3 +469,109 @@ async def test_webhook_rejects_and_dedupes(conn, skeleton, tenants, monkeypatch)
     finally:
         monkeypatch.undo()
         get_settings.cache_clear()
+
+
+# =============================================================================
+# company posts: actor vs publishing identity
+# =============================================================================
+async def test_company_post_carries_publisher_identity(conn, skeleton, tenants) -> None:
+    from app.services import social
+
+    tenant = tenants["admin"]  # SUPER_ADMIN holds posts.create
+    created = await social.create_post(
+        conn,
+        actor_user_id=tenant.user_id,
+        company_id=tenant.company_id,
+        request_id="pytest",
+        ip_address=None,
+        payload={"content": "We are hiring engineers.", "as_company": True},
+    )
+    # The human is the actor; the company is the publishing identity.
+    assert created["author_id"] == tenant.user_public_id
+    assert created["company_public_id"] == tenant.company_public_id
+    assert created["company_name"]
+
+    reread = await social.get_post(
+        conn, viewer_id=tenant.user_id, public_id=created["public_id"]
+    )
+    assert reread["company_public_id"] == tenant.company_public_id
+
+
+async def test_personal_post_carries_no_company_identity(conn, skeleton, tenants) -> None:
+    from app.services import social
+
+    tenant = tenants["admin"]
+    # Even with a company context present, a personal post is personal.
+    created = await _post(conn, skeleton, tenant)
+    assert created["company_id"] is None
+    assert created["company_public_id"] is None
+
+
+async def test_company_post_requires_posts_create(conn, skeleton, tenants) -> None:
+    import uuid
+
+    from sqlalchemy import text
+
+    from app.core.security import provision_user
+    from app.services import companies as company_service
+    from app.services import social
+
+    admin = tenants["admin"]
+    email = f"reader_{uuid.uuid4().hex[:8]}@t.test"
+    user_id = uuid.UUID(
+        str(
+            await provision_user(
+                conn, str(uuid.uuid4()), email=email, first_name="Reader", verified=True
+            )
+        )
+    )
+    await company_service.create_role(
+        conn,
+        company_id=admin.company_id,
+        name="Reader Role",
+        description="Reads posts, publishes nothing.",
+        permission_keys=["posts.read"],
+        actor_user_id=admin.user_id,
+        request_id="pytest",
+    )
+    role_id = (
+        await conn.execute(
+            text(
+                "SELECT id FROM public.company_roles "
+                "WHERE company_id = :cid AND key = 'READER_ROLE'"
+            ),
+            {"cid": admin.company_id},
+        )
+    ).scalar_one()
+    await conn.execute(
+        text(
+            "INSERT INTO public.company_memberships (company_id, user_id, role_id, status, joined_at) "
+            "VALUES (:cid, :uid, :rid, 'ACTIVE', now())"
+        ),
+        {"cid": admin.company_id, "uid": user_id, "rid": role_id},
+    )
+
+    with pytest.raises(PermissionDeniedError):
+        await social.create_post(
+            conn,
+            actor_user_id=user_id,
+            company_id=admin.company_id,
+            request_id="pytest",
+            ip_address=None,
+            payload={"content": "Corporate announcement.", "as_company": True},
+        )
+
+
+async def test_company_post_without_company_context_is_rejected(conn, skeleton, tenants) -> None:
+    from app.services import social
+
+    tenant = tenants["admin"]
+    with pytest.raises(ValidationError):
+        await social.create_post(
+            conn,
+            actor_user_id=tenant.user_id,
+            company_id=None,
+            request_id="pytest",
+            ip_address=None,
+            payload={"content": "Nowhere to publish.", "as_company": True},
+        )

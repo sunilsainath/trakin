@@ -129,6 +129,9 @@ export interface Company {
   status: string
   default_currency: string
   verification_state: string
+  tax_classification?: string | null
+  /** Masked structured TIN (••••1234). The full identifier never leaves the server. */
+  tin_last4_masked?: string | null
   /** Role keys held by the caller here, e.g. SUPER_ADMIN. */
   my_role_keys: string[]
   /** Fully resolved permissions for the caller in this company. */

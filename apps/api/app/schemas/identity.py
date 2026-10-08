@@ -129,6 +129,9 @@ class CompanyResponse(CompanyRef):
     status: str
     default_currency: str
     verification_state: str
+    tax_classification: str | None = None
+    # Masked structured TIN: the last four only, never the full identifier.
+    tin_last4_masked: str | None = None
     my_role_keys: list[str] = Field(default_factory=list)
     my_permissions: list[str] = Field(default_factory=list)
     created_at: dt.datetime
@@ -149,6 +152,12 @@ class CreateCompanyRequest(BaseModel):
     region: str | None = Field(default=None, max_length=100)
     postal_code: str | None = Field(default=None, max_length=20)
     default_currency: str = Field(default="USD", min_length=3, max_length=3)
+    # W-9 identity (Line 3a/3b classification, Part I TIN type + last-4).
+    # Full validation with field-level errors happens in the service, which
+    # is also what the review screen mirrors client-side.
+    tax_classification: str | None = None
+    tin_type: str | None = Field(default=None, max_length=10)
+    tin_last4: str | None = Field(default=None, max_length=4)
     # Reference to the uploaded W-9 document, if already processed.
     w9_document_public_id: PublicId | None = None
 

@@ -8,6 +8,7 @@ import { useCompany } from '@/hooks/use-company'
 import { PageHeader, PageShell } from '@/components/page'
 import {
   Alert,
+  Badge,
   Button,
   Card,
   CardContent,
@@ -23,6 +24,9 @@ interface Post {
   public_id: string
   author_id: string
   author_name: string | null
+  company_id: string | null
+  company_public_id: string | null
+  company_name: string | null
   content: string
   post_type: string
   reaction_count: number
@@ -43,12 +47,16 @@ const postSchema = z.object({
 const postFields: FieldConfig[] = [{ name: 'content', label: 'Share an update' }]
 
 export default function NetworkPage() {
-  const { me, can } = useCompany()
+  const { me, can, activeCompany, activeCompanyPublicId } = useCompany()
   const [posts, setPosts] = React.useState<Post[] | null>(null)
   const [connections, setConnections] = React.useState<Connection[] | null>(null)
   const [error, setError] = React.useState<unknown>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [invite, setInvite] = React.useState('')
+  const [asCompany, setAsCompany] = React.useState(false)
+
+  const canPublishAsCompany =
+    activeCompany != null && activeCompanyPublicId != null && can('posts.create')
 
   const load = React.useCallback(async () => {
     try {
@@ -69,7 +77,13 @@ export default function NetworkPage() {
   }, [load])
 
   const publish = async (values: { content: string }) => {
-    await api.post('/posts', { content: values.content })
+    await api.post(
+      '/posts',
+      { content: values.content, ...(asCompany ? { as_company: true } : {}) },
+      asCompany && activeCompanyPublicId
+        ? { companyPublicId: activeCompanyPublicId }
+        : undefined,
+    )
     await load()
   }
 
@@ -108,11 +122,24 @@ export default function NetworkPage() {
           <div className="space-y-4">
             <Card>
               <CardContent className="pt-5">
+                {canPublishAsCompany ? (
+                  <label className="mb-3 flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={asCompany}
+                      onChange={(event) => setAsCompany(event.target.checked)}
+                    />
+                    <span>
+                      Post as{' '}
+                      <span className="font-medium">{activeCompany?.display_name}</span>
+                    </span>
+                  </label>
+                ) : null}
                 <SchemaForm<{ content: string }>
                   schema={postSchema}
                   fields={postFields}
                   defaultValues={{ content: '' }}
-                  submitLabel="Post"
+                  submitLabel={asCompany ? 'Publish as company' : 'Post'}
                   onSubmit={publish}
                   banner={null}
                 />
@@ -128,12 +155,17 @@ export default function NetworkPage() {
                 <Card key={post.public_id}>
                   <CardContent className="space-y-2 pt-5">
                     <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">
-                        {post.author_id === me?.public_id
-                          ? 'You'
-                          : (post.author_name ?? post.author_id)}
+                      <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+                        {post.company_public_id ? (
+                          <Badge tone="primary">{post.company_name ?? post.company_public_id}</Badge>
+                        ) : null}
+                        <span className="font-medium text-foreground">
+                          {post.author_id === me?.public_id
+                            ? 'You'
+                            : (post.author_name ?? post.author_id)}
+                        </span>
                       </span>
-                      <span>{formatRelative(post.created_at)}</span>
+                      <span className="shrink-0">{formatRelative(post.created_at)}</span>
                     </div>
                     <p className="whitespace-pre-wrap text-sm">{post.content}</p>
                     <div className="flex items-center gap-2 pt-1">

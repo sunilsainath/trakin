@@ -22,6 +22,7 @@ import {
   Dialog,
   EmptyState,
   Input,
+  Select,
   Skeleton,
 } from '@/components/ui'
 import { CurrencySelect, Field } from '@/components/forms'
@@ -30,6 +31,14 @@ import { notifyError, notifySuccess } from '@/components/toast'
 import { PublicId } from '@/components/public-id'
 import { ErrorState } from '@/components/query'
 import { PageHeader, PageShell } from '@/components/page'
+import {
+  TAX_CLASSIFICATIONS,
+  TIN_TYPES,
+  validateW9,
+  type W9FieldKey,
+  type W9FormValues,
+} from '@/lib/w9'
+import { W9Review, type W9IntakeState } from '@/components/w9-review'
 
 /* -------------------------------------------------------------------------- */
 /* Page                                                                       */
@@ -248,6 +257,11 @@ const companySchema = z.object({
     .transform((value) => value.toUpperCase()),
   city: z.string().trim(),
   region: z.string().trim(),
+  tax_classification: z.string().trim(),
+  tin_type: z.string().trim(),
+  tin_last4: z.string().trim(),
+  address_line1: z.string().trim(),
+  postal_code: z.string().trim(),
 })
 
 type CompanyFormValues = z.infer<typeof companySchema>
@@ -259,6 +273,11 @@ const EMPTY: CompanyFormValues = {
   default_currency: 'USD',
   city: '',
   region: '',
+  tax_classification: '',
+  tin_type: '',
+  tin_last4: '',
+  address_line1: '',
+  postal_code: '',
 }
 
 /**
@@ -280,6 +299,9 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
   const [w9, setW9] = React.useState<{ public_id: string; name: string } | null>(null)
   const [uploadingW9, setUploadingW9] = React.useState(false)
   const [w9Error, setW9Error] = React.useState<string | null>(null)
+  const [step, setStep] = React.useState<'form' | 'review'>('form')
+  const [intake, setIntake] = React.useState<W9IntakeState | null>(null)
+  const [fieldErrors, setFieldErrors] = React.useState<Partial<Record<W9FieldKey, string>>>({})
 
   React.useEffect(() => {
     if (open) {
@@ -288,6 +310,9 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
       setW9(null)
       setW9Error(null)
       setUploadingW9(false)
+      setStep('form')
+      setIntake(null)
+      setFieldErrors({})
     }
   }, [open])
 
@@ -319,6 +344,11 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
           default_currency: form.default_currency,
           city: form.city || undefined,
           region: form.region || undefined,
+          address_line1: form.address_line1 || undefined,
+          postal_code: form.postal_code || undefined,
+          tax_classification: form.tax_classification || undefined,
+          tin_type: form.tin_type || undefined,
+          tin_last4: form.tin_last4 || undefined,
           w9_document_public_id: w9?.public_id,
         },
         { companyPublicId: activeCompanyPublicId, idempotencyKey },
@@ -330,6 +360,17 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
       setOpen(false)
       void refresh()
     },
+  })
+
+  const toW9Values = (form: CompanyFormValues): W9FormValues => ({
+    legal_name: form.legal_name,
+    tax_classification: form.tax_classification,
+    tin_type: form.tin_type,
+    tin_last4: form.tin_last4,
+    address_line1: form.address_line1,
+    city: form.city,
+    region: form.region,
+    postal_code: form.postal_code,
   })
 
   const set = <K extends keyof CompanyFormValues>(key: K, value: CompanyFormValues[K]) =>
@@ -356,10 +397,42 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
 
     setErrors({})
 
+    // Field-level W-9 validation mirrors the server: the review screen shows
+    // one message per line rather than a single rejection.
+    const w9Problems = validateW9(toW9Values(parsed.data), parsed.data.country_code)
+    setFieldErrors(w9Problems)
+
     try {
-      await create.mutateAsync(parsed.data)
+      const state = await api.get<W9IntakeState>(
+        `/companies/w9-intake/${encodeURIComponent(w9.public_id)}`,
+      )
+      setIntake(state)
+    } catch {
+      setIntake(null)
+    }
+    setStep('review')
+  }
+
+  const confirm = async () => {
+    setErrors({})
+
+    try {
+      await create.mutateAsync(values)
     } catch (cause) {
-      notifyError(cause, 'The company could not be created.')
+      // The server is authoritative: map its field errors back onto the form
+      // and drop to the form step so each line can be corrected.
+      const fields =
+        cause instanceof Error && 'details' in cause
+          ? (cause as { details?: { fields?: Partial<Record<W9FieldKey, string>> } }).details
+              ?.fields
+          : undefined
+      if (fields && Object.keys(fields).length > 0) {
+        setFieldErrors(fields)
+        setStep('form')
+        notifyError(cause, 'Review the highlighted W-9 fields.')
+      } else {
+        notifyError(cause, 'The company could not be created.')
+      }
     }
   }
 
@@ -373,24 +446,42 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
       <Dialog
         open={open}
         onOpenChange={setOpen}
-        title="Create a company"
-        description="You become its first super admin. A founding W-9 is required: it is stored as the company's first document and billing stays disabled until it is processed."
+        title={step === 'review' ? 'Review the W-9 information' : 'Create a company'}
+        description={
+          step === 'review'
+            ? 'Confirm every line before the company is created. Only the last four of the TIN are stored.'
+            : 'You become its first super admin. A founding W-9 is required: it is stored as the company\u2019s first document and billing stays disabled until it is processed.'
+        }
         footer={
-          <>
-            <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              form="create-company"
-              loading={create.isPending}
-              disabled={uploadingW9}
-            >
-              Create company
-            </Button>
-          </>
+          step === 'review' ? (
+            <>
+              <Button variant="ghost" onClick={() => setStep('form')} disabled={create.isPending}>
+                Back to edit
+              </Button>
+              <Button onClick={() => void confirm()} loading={create.isPending}>
+                Confirm and create
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
+                Cancel
+              </Button>
+              <Button type="submit" form="create-company" loading={false} disabled={uploadingW9}>
+                Review W-9
+              </Button>
+            </>
+          )
         }
       >
+        {step === 'review' ? (
+          <W9Review
+            values={toW9Values(values)}
+            errors={fieldErrors}
+            fileName={w9?.name ?? null}
+            intake={intake}
+          />
+        ) : (
         <form id="create-company" onSubmit={submit} className="space-y-4">
           <Field
             label="Founding W-9"
@@ -424,12 +515,12 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
             ) : null}
           </Field>
 
-          <Field label="Legal name" error={errors.legal_name} required>
+          <Field label="Legal name" error={errors.legal_name ?? fieldErrors.legal_name} required>
             <Input
               id="company-legal-name"
               value={values.legal_name}
               onChange={(event) => set('legal_name', event.target.value)}
-              aria-invalid={Boolean(errors.legal_name)}
+              aria-invalid={Boolean(errors.legal_name ?? fieldErrors.legal_name)}
             />
           </Field>
 
@@ -443,6 +534,61 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
           </Field>
 
           <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Tax classification (Line 3a)" error={fieldErrors.tax_classification} required>
+              <Select
+                id="company-tax-classification"
+                value={values.tax_classification}
+                onChange={(event) => set('tax_classification', event.target.value)}
+                aria-invalid={Boolean(fieldErrors.tax_classification)}
+              >
+                <option value="">Select…</option>
+                {TAX_CLASSIFICATIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="TIN type (Part I)" error={fieldErrors.tin_type} required>
+              <Select
+                id="company-tin-type"
+                value={values.tin_type}
+                onChange={(event) => set('tin_type', event.target.value)}
+                aria-invalid={Boolean(fieldErrors.tin_type)}
+              >
+                <option value="">Select…</option>
+                {TIN_TYPES.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field
+              label="TIN last 4 (Part I)"
+              error={fieldErrors.tin_last4}
+              required
+              hint="Only the last four are stored."
+            >
+              <Input
+                id="company-tin-last4"
+                value={values.tin_last4}
+                maxLength={4}
+                inputMode="numeric"
+                onChange={(event) => set('tin_last4', event.target.value.replace(/\D/g, ''))}
+                aria-invalid={Boolean(fieldErrors.tin_last4)}
+                className="font-mono"
+                placeholder="4821"
+              />
+            </Field>
+            <Field label="Street address (Line 5)" error={fieldErrors.address_line1} required>
+              <Input
+                id="company-address"
+                value={values.address_line1}
+                onChange={(event) => set('address_line1', event.target.value)}
+                aria-invalid={Boolean(fieldErrors.address_line1)}
+              />
+            </Field>
             <Field label="Country code" error={errors.country_code} required hint="Two-letter ISO code">
               <Input
                 id="company-country"
@@ -459,22 +605,33 @@ export function CreateCompanyDialog({ triggerLabel = 'New company' }: { triggerL
                 onChange={(value) => set('default_currency', value)}
               />
             </Field>
-            <Field label="City">
+            <Field label="City (Line 6)" error={fieldErrors.city} required>
               <Input
                 id="company-city"
                 value={values.city}
                 onChange={(event) => set('city', event.target.value)}
+                aria-invalid={Boolean(fieldErrors.city)}
               />
             </Field>
-            <Field label="Region or state">
+            <Field label="Region or state (Line 6)" error={fieldErrors.region} required>
               <Input
                 id="company-region"
                 value={values.region}
                 onChange={(event) => set('region', event.target.value)}
+                aria-invalid={Boolean(fieldErrors.region)}
+              />
+            </Field>
+            <Field label="ZIP (Line 6)" error={fieldErrors.postal_code} required>
+              <Input
+                id="company-postal"
+                value={values.postal_code}
+                onChange={(event) => set('postal_code', event.target.value)}
+                aria-invalid={Boolean(fieldErrors.postal_code)}
               />
             </Field>
           </div>
         </form>
+        )}
       </Dialog>
     </>
   )

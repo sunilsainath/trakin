@@ -558,3 +558,69 @@ def test_feature_flag_bucketing_is_stable() -> None:
     second = int(hashlib.sha256(f"ai.assistant:{subject}".encode()).hexdigest()[:8], 16) % 100
     assert first == second
     assert 0 <= first < 100
+
+
+# ------------------------------------------------------------------ w9 identity
+def _valid_w9_payload() -> dict:
+    return {
+        "legal_name": "ABC Technologies LLC",
+        "tax_classification": "LLC_S_CORP",
+        "tin_type": "ein",
+        "tin_last4": "4821",
+        "address_line1": "548 Market Street",
+        "city": "San Francisco",
+        "region": "CA",
+        "postal_code": "94107",
+        "country_code": "US",
+    }
+
+
+def test_w9_identity_accepts_a_complete_return() -> None:
+    from app.services.companies import validate_w9_identity
+
+    normalised = validate_w9_identity(_valid_w9_payload())
+    assert normalised == {
+        "tax_classification": "LLC_S_CORP",
+        "tin_type": "EIN",
+        "tin_last4": "4821",
+    }
+
+
+def test_w9_identity_names_each_failing_field() -> None:
+    from app.core.errors import BusinessRuleViolationError
+    from app.services.companies import validate_w9_identity
+
+    payload = _valid_w9_payload()
+    payload.update(
+        legal_name="",
+        tax_classification="KINGDOM",
+        tin_type="PASSPORT",
+        tin_last4="12",
+        address_line1="",
+        city="",
+        region="",
+        postal_code="9410",
+    )
+    with pytest.raises(BusinessRuleViolationError) as exc_info:
+        validate_w9_identity(payload)
+    fields = exc_info.value.details["fields"]
+    assert set(fields) == {
+        "legal_name",
+        "tax_classification",
+        "tin_type",
+        "tin_last4",
+        "address_line1",
+        "city",
+        "region",
+        "postal_code",
+    }
+    assert fields["legal_name"].startswith("Line 1")
+    assert fields["tin_last4"].startswith("Part I")
+
+
+def test_w9_identity_accepts_non_us_postal_codes() -> None:
+    from app.services.companies import validate_w9_identity
+
+    payload = _valid_w9_payload()
+    payload.update(country_code="IN", postal_code="560001", region="Karnataka")
+    validate_w9_identity(payload)

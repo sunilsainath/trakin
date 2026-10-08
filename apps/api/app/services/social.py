@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.errors import (
     BusinessRuleViolationError,
+    PermissionDeniedError,
     ResourceNotFoundError,
     ValidationError,
 )
@@ -26,9 +27,12 @@ _POST_SELECT = """
            p.visibility, p.document_id, p.project_id, p.reaction_count,
            p.comment_count, p.share_count, p.edited_at, p.created_at, p.updated_at,
            u.public_id AS author_public_id,
-           NULLIF(TRIM(u.first_name || ' ' || u.last_name), '') AS author_name
+           NULLIF(TRIM(u.first_name || ' ' || u.last_name), '') AS author_name,
+           c.public_id AS company_public_id,
+           c.display_name AS company_name
       FROM public.posts p
       JOIN public.users u ON u.id = p.author_id
+      LEFT JOIN public.companies c ON c.id = p.company_id
 """
 
 
@@ -96,6 +100,14 @@ async def create_post(
     ip_address: str | None,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    """Create a personal post, or publish one as a company.
+
+    The two identities stay distinct in the row: `author_id` is always the
+    human actor, `company_id` is the publishing identity and is set only for
+    company posts. Publishing as a company requires the `posts.create` grant
+    in that company; without it the author can still post personally, but the
+    post carries no company identity.
+    """
     content = str(payload.get("content") or "").strip()
     if not (1 <= len(content) <= 5000):
         raise ValidationError("Post content must be 1-5000 characters.")
@@ -105,6 +117,21 @@ async def create_post(
     visibility = str(payload.get("visibility") or "PUBLIC").upper()
     if visibility not in {"PUBLIC", "CONNECTIONS", "PRIVATE"}:
         raise ValidationError(f"Unknown visibility: {visibility}.")
+
+    as_company = bool(payload.get("as_company", False))
+    if as_company:
+        if company_id is None:
+            raise ValidationError("Choose a company to publish as.")
+        allowed = (
+            await conn.execute(
+                text("SELECT app.has_permission(:cid, 'posts.create', :uid) AS ok"),
+                {"cid": company_id, "uid": actor_user_id},
+            )
+        ).scalar()
+        if not allowed:
+            raise PermissionDeniedError("Publishing as this company requires posts.create.")
+    else:
+        company_id = None
 
     row = (
         (

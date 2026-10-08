@@ -27,6 +27,73 @@ from app.services import audit
 logger = get_logger(__name__)
 
 
+#: W-9 Line 3a federal tax classifications, with the Line 3b LLC letter folded
+#: in as distinct values. Mirrors the CHECK constraint on companies.
+TAX_CLASSIFICATIONS = (
+    "INDIVIDUAL_SOLE_PROPRIETOR",
+    "C_CORPORATION",
+    "S_CORPORATION",
+    "PARTNERSHIP",
+    "TRUST_ESTATE",
+    "LLC_SOLE_PROPRIETORSHIP",
+    "LLC_C_CORP",
+    "LLC_S_CORP",
+    "LLC_PARTNERSHIP",
+    "OTHER",
+)
+
+#: W-9 Part I TIN types. Every W-9 does not carry an EIN.
+TIN_TYPES = ("EIN", "SSN", "ITIN")
+
+
+def validate_w9_identity(payload: dict[str, Any]) -> dict[str, str]:
+    """Field-level W-9 validation with the failing field named, not a shrug.
+
+    Returns the normalised classification / TIN fields, raising a
+    BusinessRuleViolationError carrying `details.fields` when anything is
+    missing or malformed. This is the same contract the review screen mirrors
+    client-side; the server always has the final word.
+    """
+    import re
+
+    fields: dict[str, str] = {}
+    if len(str(payload.get("legal_name") or "").strip()) < 2:
+        fields["legal_name"] = "Line 1 — Name is required."
+    classification = str(payload.get("tax_classification") or "").strip().upper()
+    if not classification:
+        fields["tax_classification"] = "Line 3a — Federal tax classification is required."
+    elif classification not in TAX_CLASSIFICATIONS:
+        fields["tax_classification"] = "Line 3a — Select a valid federal tax classification."
+    tin_type = str(payload.get("tin_type") or "").strip().upper()
+    if tin_type not in TIN_TYPES:
+        fields["tin_type"] = "Part I — Select the TIN type (EIN, SSN or ITIN)."
+    tin_last4 = str(payload.get("tin_last4") or "").strip()
+    if re.fullmatch(r"\d{4}", tin_last4) is None:
+        fields["tin_last4"] = "Part I — Enter the last 4 digits of the TIN."
+    if not str(payload.get("address_line1") or "").strip():
+        fields["address_line1"] = "Line 5 — Street address is required."
+    if not str(payload.get("city") or "").strip():
+        fields["city"] = "Line 6 — City is required."
+    if not str(payload.get("region") or "").strip():
+        fields["region"] = "Line 6 — State is required."
+    postal = str(payload.get("postal_code") or "").strip()
+    country = str(payload.get("country_code") or "").strip().upper()
+    if not postal:
+        fields["postal_code"] = "Line 6 — ZIP code is required."
+    elif country == "US" and re.fullmatch(r"\d{5}(-\d{4})?", postal) is None:
+        fields["postal_code"] = "Line 6 — ZIP code format is not valid (e.g. 94107)."
+    if fields:
+        raise BusinessRuleViolationError(
+            "The W-9 information needs corrections before the company can be created.",
+            details={"fields": fields},
+        )
+    return {
+        "tax_classification": classification,
+        "tin_type": tin_type,
+        "tin_last4": tin_last4,
+    }
+
+
 # ------------------------------------------------------------------- companies
 async def list_my_companies(conn: AsyncConnection, user_id: uuid.UUID) -> list[dict[str, Any]]:
     """Companies the user is an active member of.
@@ -68,7 +135,9 @@ async def get_company(conn: AsyncConnection, company_id: uuid.UUID) -> dict[str,
                     """
                 SELECT public_id, legal_name, display_name, dba, country_code,
                        status, default_currency, verification_state, created_at,
-                       fiscal_year_start
+                       fiscal_year_start, tax_classification, tax_id_type,
+                       CASE WHEN tax_id_last4 IS NULL THEN NULL
+                            ELSE '••••' || tax_id_last4 END AS tin_last4_masked
                   FROM public.companies
                  WHERE id = :id AND deleted_at IS NULL
                 """
@@ -134,6 +203,8 @@ async def create_company(
     if w9_id is None:
         raise ResourceNotFoundError("The referenced W-9 document was not found.")
 
+    w9_identity = validate_w9_identity(payload)
+
     row = (
         (
             await conn.execute(
@@ -142,10 +213,12 @@ async def create_company(
                 INSERT INTO public.companies
                   (legal_name, display_name, dba, country_code, address_line1,
                    address_line2, city, region, postal_code, default_currency,
+                   tax_classification, tax_id_type, tax_id_last4,
                    w9_document_id, created_by)
                 VALUES
                   (:legal_name, :display_name, :dba, :country_code, :address_line1,
                    :address_line2, :city, :region, :postal_code, :default_currency,
+                   :tax_classification, :tax_id_type, :tax_id_last4,
                    CAST(:w9_id AS uuid), :created_by)
                 RETURNING id::text, public_id, created_at
                 """
@@ -161,6 +234,9 @@ async def create_company(
                     "region": payload.get("region"),
                     "postal_code": payload.get("postal_code"),
                     "default_currency": payload.get("default_currency", "USD"),
+                    "tax_classification": w9_identity["tax_classification"],
+                    "tax_id_type": w9_identity["tin_type"],
+                    "tax_id_last4": w9_identity["tin_last4"],
                     "w9_id": w9_id["id"],
                     "created_by": founder_user_id,
                 },
@@ -243,10 +319,19 @@ async def update_company(
         "region",
         "postal_code",
         "default_currency",
+        "tax_classification",
     }
     payload = {k: v for k, v in changes.items() if k in allowed and v is not None}
     if not payload:
         return await get_company(conn, company_id)
+    if "tax_classification" in payload:
+        classification = str(payload["tax_classification"]).strip().upper()
+        if classification not in TAX_CLASSIFICATIONS:
+            raise BusinessRuleViolationError(
+                "Line 3a — Select a valid federal tax classification.",
+                details={"fields": {"tax_classification": "Unknown classification."}},
+            )
+        payload["tax_classification"] = classification
 
     before = await get_company(conn, company_id)
 
@@ -942,7 +1027,7 @@ async def update_role_permissions(
             text(
                 """
                 INSERT INTO public.role_permissions (role_id, permission_key, granted_by)
-                SELECT CAST(:rid AS uuid), k, :uid FROM unnest(:keys) AS k
+                SELECT CAST(:rid AS uuid), k, :uid FROM unnest(CAST(:keys AS text[])) AS k
                 ON CONFLICT DO NOTHING
                 """
             ),
@@ -1038,7 +1123,7 @@ async def create_role(
             text(
                 """
                 INSERT INTO public.role_permissions (role_id, permission_key, granted_by)
-                SELECT CAST(:rid AS uuid), k, :uid FROM unnest(:keys) AS k
+                SELECT CAST(:rid AS uuid), k, :uid FROM unnest(CAST(:keys AS text[])) AS k
                 """
             ),
             {"rid": row["id"], "keys": permission_keys, "uid": actor_user_id},

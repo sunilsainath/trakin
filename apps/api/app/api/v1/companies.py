@@ -152,6 +152,26 @@ async def upload_founding_w9(
     )
 
 
+@router.get(
+    "/companies/w9-intake/{document_public_id}",
+    response_model=dict[str, Any],
+    summary="Processing state of a founding W-9",
+)
+async def w9_intake_status(
+    ctx_and_conn: UserOnlyContext, document_public_id: str
+) -> dict[str, Any]:
+    """Scan/extraction stage states for the review screen.
+
+    Owner-authorised, company-less: the company does not exist yet. Only
+    stage states are returned, never file bytes. A PENDING extraction state
+    is reported as pending — never as extracted data.
+    """
+    ctx, conn = ctx_and_conn
+    return await document_service.get_w9_intake_status(
+        conn, public_id=document_public_id, owner_user_id=ctx.user_id
+    )
+
+
 @router.get("/companies/current", response_model=CompanyResponse, summary="Active company")
 async def get_current_company(
     ctx_and_conn: MemberContext,
