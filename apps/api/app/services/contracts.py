@@ -32,6 +32,7 @@ from app.services.lookup import (
     as_decimal,
     json_or_empty,
     resolve_company_public_id,
+    resolve_personal,
     resolve_scoped,
     resolve_user_public_id,
 )
@@ -53,6 +54,7 @@ _CONTRACT_SELECT = """
            c.counterparty_company_id, c.counterparty_user_id, c.document_id,
            c.risk_score, c.version, c.sent_at, c.responded_at, c.activated_at,
            c.terminated_at, c.response_notes, c.created_at, c.updated_at,
+           ru.public_id AS responded_by_public_id,
            c.metadata,
            p.public_id AS project_public_id, p.name AS project_name,
            s.public_id AS sow_public_id, s.title AS sow_title,
@@ -70,6 +72,7 @@ _CONTRACT_SELECT = """
       JOIN public.sows s      ON s.id = c.sow_id
       LEFT JOIN public.companies cp ON cp.id = c.counterparty_company_id
       LEFT JOIN public.users cu     ON cu.id = c.counterparty_user_id
+      LEFT JOIN public.users ru     ON ru.id = c.responded_by
       LEFT JOIN LATERAL (
             SELECT sum(i.total_amount) FILTER (
                      WHERE i.status NOT IN ('DRAFT','PENDING','SUBMITTED','CANCELLED','REJECTED')
@@ -98,6 +101,7 @@ def _contract_from_row(row: Any) -> dict[str, Any]:
     data["sow_id"] = data.pop("sow_public_id")
     data["counterparty_company_id"] = data.pop("counterparty_company_public_id", None)
     data["counterparty_user_id"] = data.pop("counterparty_user_public_id", None)
+    data["responded_by"] = data.pop("responded_by_public_id", None)
     data["project_name"] = data.get("project_name")
     data["sow_title"] = data.get("sow_title")
     data["counterparty_company_name"] = data.get("counterparty_company_name")
@@ -1108,10 +1112,53 @@ async def send_contract(
     return await get_contract(conn, company_id=company_id, public_id=public_id)
 
 
+async def _resolve_contract_for_decision(
+    conn: AsyncConnection,
+    *,
+    public_id: str,
+    user_id: uuid.UUID,
+    company_id: uuid.UUID | None,
+    lock: bool = False,
+) -> dict[str, Any]:
+    """Fetch a contract the caller may decide on: owning company, counterparty
+    member company, counterparty user, or personal owner. Anything else is a
+    404 — a foreign contract id must never confirm its own existence."""
+    sql = (
+        "SELECT c.id, c.public_id, c.status, c.company_id,"
+        " c.counterparty_company_id, c.counterparty_user_id, c.created_by"
+        " FROM public.contracts c WHERE c.public_id = :pid AND c.deleted_at IS NULL"
+    )
+    if lock:
+        sql += " FOR UPDATE"
+    row = (await conn.execute(text(sql), {"pid": public_id})).mappings().first()
+    if row is None:
+        raise ResourceNotFoundError("Contract not found.")
+    data = dict(row)
+
+    allowed = False
+    if data["company_id"] is None:
+        allowed = str(data["created_by"]) == str(user_id) or str(
+            data["counterparty_user_id"] or ""
+        ) == str(user_id)
+    elif company_id is not None and str(data["company_id"]) == str(company_id):
+        allowed = True
+    elif data["counterparty_company_id"] is not None:
+        member = await conn.execute(
+            text("SELECT app.is_member(CAST(:cid AS uuid))"),
+            {"cid": data["counterparty_company_id"]},
+        )
+        allowed = bool(member.scalar())
+    elif data["counterparty_user_id"] is not None:
+        allowed = str(data["counterparty_user_id"]) == str(user_id)
+    if not allowed:
+        raise ResourceNotFoundError("Contract not found.")
+    return data
+
+
 async def respond_to_contract(
     conn: AsyncConnection,
     *,
-    company_id: uuid.UUID,
+    company_id: uuid.UUID | None,
     public_id: str,
     accept: bool,
     actor_user_id: uuid.UUID,
@@ -1120,7 +1167,9 @@ async def respond_to_contract(
     notes: str | None,
 ) -> dict[str, Any]:
     """Counterparty acceptance (or rejection) of a sent contract."""
-    before = await resolve_scoped(conn, "contracts", public_id, company_id, lock=True)
+    before = await _resolve_contract_for_decision(
+        conn, public_id=public_id, user_id=actor_user_id, company_id=company_id, lock=True
+    )
     current = str(before["status"])
     target = "ACCEPTED" if accept else "DECLINED"
     if target not in CONTRACT_TRANSITIONS.get(current, ()):
@@ -1147,9 +1196,10 @@ async def respond_to_contract(
 
     await conn.execute(
         text(
-            "UPDATE public.contracts SET status = :target, response_notes = :notes WHERE id = :rid"
+            "UPDATE public.contracts SET status = :target, response_notes = :notes,"
+            " responded_by = :actor, responded_at = now() WHERE id = :rid"
         ),
-        {"target": target, "notes": notes, "rid": before["id"]},
+        {"target": target, "notes": notes, "actor": actor_user_id, "rid": before["id"]},
     )
     await conn.execute(
         text(
@@ -1176,7 +1226,36 @@ async def respond_to_contract(
         request_id=request_id,
         ip_address=ip_address,
     )
-    return await get_contract(conn, company_id=company_id, public_id=public_id)
+    return await _get_contract_after_decision(conn, public_id=public_id)
+
+
+async def _get_contract_after_decision(conn: AsyncConnection, *, public_id: str) -> dict[str, Any]:
+    """Read-back after accept/decline for any deciding party.
+
+    The decision right was already verified; row visibility additionally passes
+    through RLS (`can_view_contract` covers owner, counterparty member and
+    counterparty user), so no party reads what it may not see.
+    """
+    row = (
+        (
+            await conn.execute(
+                text(f"{_CONTRACT_SELECT} WHERE c.public_id = :pid"),
+                {"pid": public_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Contract not found.")
+    roles, parties, line_items, steps = await _contract_children(conn, row["id"])
+    data = _contract_from_row(row)
+    data["roles"] = roles
+    data["parties"] = parties
+    data["line_items"] = line_items
+    data["approval_steps"] = steps
+    data["allowed_transitions"] = list(CONTRACT_TRANSITIONS.get(str(row["status"]), ()))
+    return data
 
 
 async def activate_contract(
@@ -1475,3 +1554,451 @@ async def contract_roles(
     contract = await get_contract(conn, company_id=company_id, public_id=public_id)
     roles: list[dict[str, Any]] = contract["roles"]
     return roles
+
+
+# =============================================================================
+# personal (INDIVIDUAL) contracts — no company, owned by the creator
+# =============================================================================
+async def _personal_contract_read(
+    conn: AsyncConnection, *, user_id: uuid.UUID, public_id: str
+) -> dict[str, Any]:
+    """Read a personal contract for its owner or its counterparty user."""
+    row = (
+        (
+            await conn.execute(
+                text(
+                    f"""{_CONTRACT_SELECT}
+                     WHERE c.public_id = :pid AND c.company_id IS NULL
+                       AND c.deleted_at IS NULL
+                       AND (c.created_by = :uid OR c.counterparty_user_id = :uid)"""
+                ),
+                {"pid": public_id, "uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Contract not found.")
+    roles, parties, line_items, steps = await _contract_children(conn, row["id"])
+    data = _contract_from_row(row)
+    data["roles"] = roles
+    data["parties"] = parties
+    data["line_items"] = line_items
+    data["approval_steps"] = steps
+    data["allowed_transitions"] = list(CONTRACT_TRANSITIONS.get(str(row["status"]), ()))
+    return data
+
+
+async def _resolve_personal_contract_roles(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+    requested: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in requested:
+        role_public_id = item["project_role_id"]
+        if role_public_id in seen:
+            raise ValidationError(
+                "The same project role appears twice on this contract.",
+                details={"project_role_id": role_public_id},
+            )
+        seen.add(role_public_id)
+
+        role = await resolve_personal(conn, "project_roles", role_public_id, user_id)
+        if str(role["project_id"]) != str(project_id):
+            raise BusinessRuleViolationError(
+                "That role does not belong to this contract's project.",
+                details={
+                    "project_role_id": role_public_id,
+                    "reason": "PROJECT_ROLE_NOT_ON_PROJECT",
+                },
+            )
+        out.append({**item, "project_role_id": role["id"]})
+    return out
+
+
+async def create_personal_contract(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    sow_public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Create one engagement contract under the caller's personal SOW (§19).
+
+    Each actual assignment gets its own contract; the SOW stays the commercial
+    allocation layer and the contract the binding engagement.
+    """
+    from app.services import code as code_service
+
+    sow = await code_service.get_personal_sow(conn, user_id=user_id, public_id=sow_public_id)
+    if payload.get("project_id") and str(payload["project_id"]) != str(sow["project_id"]):
+        raise BusinessRuleViolationError(
+            "The selected SOW belongs to a different project.",
+            details={"reason": "SOW_PROJECT_MISMATCH"},
+        )
+    project_id = await _personal_project_uuid(conn, user_id, sow["project_id"])
+
+    counterparty_user = None
+    if payload.get("counterparty_user_id"):
+        counterparty_user = await resolve_user_public_id(conn, payload["counterparty_user_id"])
+    elif sow.get("counterparty_user_id"):
+        # _sow_from_row exposes the counterparty as a public U... id.
+        counterparty_user = await resolve_user_public_id(conn, sow["counterparty_user_id"])
+
+    roles = await _resolve_personal_contract_roles(
+        conn,
+        user_id=user_id,
+        project_id=project_id,
+        requested=payload.get("roles") or [],
+    )
+    if not roles:
+        raise ValidationError(
+            "A contract needs at least one role from its SOW.",
+            details={"reason": "CONTRACT_HAS_NO_ROLES"},
+        )
+
+    from app.services.billing import money
+
+    contract_value = payload.get("contract_value")
+    metadata = {
+        "contract_value": str(money(contract_value)) if contract_value is not None else None,
+        "terms_snapshot": payload.get("terms_snapshot") or {},
+    }
+
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.contracts
+                      (sow_id, project_id, company_id, contract_type, title, status,
+                       currency, billing_basis, billing_frequency, payment_terms_days,
+                       start_date, end_date, counterparty_user_id,
+                       requires_timesheets, metadata, created_by)
+                    VALUES
+                      (:sow, :pid, NULL, 'INDIVIDUAL', :title, 'DRAFT',
+                       :currency, :basis, :frequency, :terms,
+                       :start_date, :end_date, CAST(:counterparty AS uuid),
+                       :requires_timesheets, CAST(:metadata AS jsonb), :actor)
+                    RETURNING public_id
+                    """
+                ),
+                {
+                    "sow": sow["id"],
+                    "pid": project_id,
+                    "title": payload["title"],
+                    "currency": payload.get("currency", "USD"),
+                    "basis": payload.get("billing_basis", "TIMESHEET"),
+                    "frequency": payload.get("billing_frequency", "MONTHLY"),
+                    "terms": payload.get("payment_terms_days", 30),
+                    "start_date": payload.get("start_date") or sow.get("start_date"),
+                    "end_date": payload.get("end_date") or sow.get("end_date"),
+                    "counterparty": counterparty_user,
+                    "requires_timesheets": payload.get("requires_timesheets", True),
+                    "metadata": _json(metadata),
+                    "actor": actor_user_id,
+                },
+            )
+        )
+        .mappings()
+        .first()
+    )
+    contract_id = uuid.UUID(
+        str(
+            (
+                await conn.execute(
+                    text("SELECT id FROM public.contracts WHERE public_id = :pid"),
+                    {"pid": str(row["public_id"])},
+                )
+            ).scalar_one()
+        )
+    )
+
+    await _insert_contract_roles(
+        conn,
+        contract_id=contract_id,
+        company_id=user_id,  # unused by the insert; kept for signature parity
+        requested=roles,
+        default_currency=payload.get("currency", "USD"),
+        default_basis=payload.get("billing_basis", "TIMESHEET"),
+        default_frequency=payload.get("billing_frequency", "MONTHLY"),
+        default_terms=payload.get("payment_terms_days", 30),
+        start_date=payload.get("start_date"),
+        end_date=payload.get("end_date"),
+    )
+    await conn.execute(
+        text(
+            """
+            INSERT INTO public.contract_parties (contract_id, party_user_id, party_role)
+            VALUES (:cid, :owner, 'PRIMARY'), (:cid, CAST(:counterparty AS uuid), 'COUNTERPARTY')
+            """
+        ),
+        {"cid": contract_id, "owner": actor_user_id, "counterparty": counterparty_user},
+    )
+    await _insert_contract_line_items(
+        conn, contract_id=contract_id, requested=payload.get("line_items") or []
+    )
+
+    await audit.record(
+        conn,
+        action="contract.created",
+        resource_type="contract",
+        resource_id=contract_id,
+        resource_public_id=str(row["public_id"]),
+        actor_user_id=actor_user_id,
+        new_values={
+            "sow_id": sow_public_id,
+            "title": payload["title"],
+            "role_count": len(roles),
+        },
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await _personal_contract_read(conn, user_id=user_id, public_id=str(row["public_id"]))
+
+
+async def get_personal_contract(
+    conn: AsyncConnection, *, user_id: uuid.UUID, public_id: str
+) -> dict[str, Any]:
+    """Owner-or-counterparty read of one personal contract."""
+    return await _personal_contract_read(conn, user_id=user_id, public_id=public_id)
+
+
+async def _personal_project_uuid(
+    conn: AsyncConnection, user_id: uuid.UUID, project_public_id: str
+) -> uuid.UUID:
+    from app.services import code as code_service
+
+    project = await code_service.get_personal_project(
+        conn, user_id=user_id, public_id=project_public_id
+    )
+    row = (
+        await conn.execute(
+            text("SELECT id FROM public.projects WHERE public_id = :pid"),
+            {"pid": project["public_id"]},
+        )
+    ).scalar_one()
+    return uuid.UUID(str(row))
+
+
+async def create_personal_contract_from_sow(
+    conn: AsyncConnection,
+    *,
+    sow_public_id: str,
+    owner_user_id: uuid.UUID,
+    request_id: str,
+) -> dict[str, Any]:
+    """§17: an accepted individual SOW automatically gains its engagement
+    contract, so no SOW is ever an orphan that cannot become executable."""
+    from app.services import code as code_service
+
+    sow = await code_service.get_personal_sow(conn, user_id=owner_user_id, public_id=sow_public_id)
+    roles = [
+        {
+            "project_role_id": r["project_role_id"],
+            "quantity": r.get("quantity", 1),
+            "rate": r.get("rate"),
+            "rate_type": r.get("rate_type", "HOURLY"),
+            "currency": r.get("currency", sow.get("currency", "USD")),
+        }
+        for r in sow.get("roles") or []
+    ]
+    contract = await create_personal_contract(
+        conn,
+        user_id=owner_user_id,
+        sow_public_id=sow_public_id,
+        actor_user_id=owner_user_id,
+        request_id=request_id,
+        ip_address=None,
+        payload={
+            "title": f"{sow['title']} — engagement",
+            "counterparty_user_id": sow.get("counterparty_user_id"),
+            "currency": sow.get("currency", "USD"),
+            "billing_basis": sow.get("billing_basis", "TIMESHEET"),
+            "billing_frequency": sow.get("billing_frequency", "MONTHLY"),
+            "payment_terms_days": sow.get("payment_terms_days", 30),
+            "start_date": sow.get("start_date"),
+            "end_date": sow.get("end_date"),
+            "roles": roles,
+        },
+    )
+    # Mutual SOW acceptance is mutual contract agreement.
+    await conn.execute(
+        text(
+            "UPDATE public.contracts SET status = 'ACTIVE', activated_at = now()"
+            " WHERE public_id = :pid"
+        ),
+        {"pid": contract["public_id"]},
+    )
+    internal_id = (
+        await conn.execute(
+            text("SELECT id FROM public.contracts WHERE public_id = :pid"),
+            {"pid": contract["public_id"]},
+        )
+    ).scalar_one()
+    await audit.record(
+        conn,
+        action="contract.activated",
+        resource_type="contract",
+        resource_id=internal_id,
+        resource_public_id=contract["public_id"],
+        actor_user_id=owner_user_id,
+        old_values={"status": "DRAFT"},
+        new_values={"status": "ACTIVE", "via": "sow_acceptance"},
+        request_id=request_id,
+    )
+    return await _personal_contract_read(
+        conn, user_id=owner_user_id, public_id=contract["public_id"]
+    )
+
+
+async def list_personal_contracts(
+    conn: AsyncConnection, *, user_id: uuid.UUID, limit: int
+) -> list[dict[str, Any]]:
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    f"""{_CONTRACT_SELECT}
+                     WHERE c.company_id IS NULL AND c.deleted_at IS NULL
+                       AND (c.created_by = :uid OR c.counterparty_user_id = :uid)
+                     ORDER BY c.created_at DESC
+                     LIMIT :limit"""
+                ),
+                {"uid": user_id, "limit": limit},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    out = []
+    for r in rows:
+        data = _contract_from_row(r)
+        data["roles"] = []  # list view stays light; detail carries children
+        out.append(data)
+    return out
+
+
+async def update_personal_contract(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    before = await resolve_personal_contract(conn, user_id, public_id, lock=True)
+    if str(before["status"]) != "DRAFT":
+        raise InvalidStateTransitionError(
+            "Commercial terms can only be edited while the contract is a draft.",
+            details={"status": before["status"]},
+        )
+    updates = {k: v for k, v in changes.items() if k in _CONTRACT_UPDATABLE and v is not None}
+    if updates:
+        assignments = ", ".join(f"{col} = :{col}" for col in updates)
+        await conn.execute(
+            text(f"UPDATE public.contracts SET {assignments} WHERE id = :rid"),  # noqa: S608
+            {**updates, "rid": before["id"]},
+        )
+    after = await _personal_contract_read(conn, user_id=user_id, public_id=public_id)
+    await audit.record(
+        conn,
+        action="contract.updated",
+        resource_type="contract",
+        resource_id=before["id"],
+        resource_public_id=public_id,
+        actor_user_id=actor_user_id,
+        old_values={k: _jsonable(before.get(k)) for k in updates},
+        new_values={k: _jsonable(after.get(k)) for k in updates},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return after
+
+
+async def resolve_personal_contract(
+    conn: AsyncConnection, user_id: uuid.UUID, public_id: str, *, lock: bool = False
+) -> dict[str, Any]:
+    """Owner-scoped personal contract lookup for mutations."""
+    sql = (
+        "SELECT c.id, c.public_id, c.project_id, c.sow_id, c.status, c.title,"
+        " c.currency, c.billing_basis, c.billing_frequency, c.payment_terms_days,"
+        " c.start_date, c.end_date, c.counterparty_user_id, c.created_by"
+        " FROM public.contracts c WHERE c.public_id = :pid"
+        " AND c.company_id IS NULL AND c.created_by = :uid"
+    )
+    if lock:
+        sql += " FOR UPDATE"
+    row = (await conn.execute(text(sql), {"pid": public_id, "uid": user_id})).mappings().first()
+    if row is None:
+        raise ResourceNotFoundError("Contract not found.")
+    return dict(row)
+
+
+async def transition_personal_contract(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    public_id: str,
+    target: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """DRAFT→SENT→ACCEPTED→ACTIVE plus TERMINATED/CLOSED, same map as company."""
+    before = await _resolve_contract_for_decision(
+        conn, public_id=public_id, user_id=actor_user_id, company_id=None, lock=True
+    )
+    if before["company_id"] is not None:
+        raise ResourceNotFoundError("Contract not found.")
+    current = str(before["status"])
+    if target == "SENT" and current != "DRAFT":
+        raise InvalidStateTransitionError(
+            f"A personal contract in status {current} cannot be sent.",
+            details={"status": current},
+        )
+    elif target != "SENT" and target not in CONTRACT_TRANSITIONS.get(current, ()):
+        raise InvalidStateTransitionError(
+            f"A contract in status {current} cannot move to {target}.",
+            details={"status": current, "allowed": list(CONTRACT_TRANSITIONS.get(current, ()))},
+        )
+    if target == "TERMINATED" and not (reason or "").strip():
+        raise ValidationError(
+            "Terminating a contract requires a reason.",
+            details={"reason": "REASON_REQUIRED"},
+        )
+    await conn.execute(
+        text(
+            "UPDATE public.contracts SET status = CAST(:target AS contract_status),"
+            " sent_at = CASE WHEN :target = 'SENT' THEN now() ELSE sent_at END,"
+            " activated_at = CASE WHEN :target = 'ACTIVE' THEN now() ELSE activated_at END,"
+            " terminated_at = CASE WHEN :target = 'TERMINATED' THEN now() ELSE terminated_at END"
+            " WHERE id = :rid"
+        ),
+        {"target": target, "rid": before["id"]},
+    )
+    await audit.record(
+        conn,
+        action=f"contract.{target.lower()}",
+        resource_type="contract",
+        resource_id=before["id"],
+        resource_public_id=public_id,
+        actor_user_id=actor_user_id,
+        old_values={"status": current},
+        new_values={"status": target},
+        reason=reason,
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await _personal_contract_read(conn, user_id=user_id, public_id=public_id)

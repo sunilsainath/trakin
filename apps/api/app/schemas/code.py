@@ -618,6 +618,7 @@ class ContractResponse(BaseModel):
     activated_at: dt.datetime | None = None
     terminated_at: dt.datetime | None = None
     response_notes: str | None = None
+    responded_by: str | None = None
     allowed_transitions: list[str] = Field(default_factory=list)
     created_at: dt.datetime
     updated_at: dt.datetime

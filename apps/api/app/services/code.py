@@ -2060,6 +2060,42 @@ async def get_personal_sow(
     return data
 
 
+async def submit_personal_sow(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    """DRAFT → PENDING_APPROVAL for a personal SOW, so its counterparty can decide."""
+    before = await resolve_personal(conn, "sows", public_id, user_id, lock=True)
+    current = str(before["status"])
+    if current != "DRAFT":
+        raise InvalidStateTransitionError(
+            f"A personal SOW in status {current} cannot be submitted.",
+            details={"status": current, "acceptable_in": ["DRAFT"]},
+        )
+    await conn.execute(
+        text("UPDATE public.sows SET status = 'PENDING_APPROVAL' WHERE id = :rid"),
+        {"rid": before["id"]},
+    )
+    await audit.record(
+        conn,
+        action="sow.submitted",
+        resource_type="sow",
+        resource_id=before["id"],
+        resource_public_id=public_id,
+        actor_user_id=actor_user_id,
+        old_values={"status": current},
+        new_values={"status": "PENDING_APPROVAL"},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await get_personal_sow(conn, user_id=user_id, public_id=public_id)
+
+
 async def _resolve_sow_for_decision(
     conn: AsyncConnection,
     *,
@@ -2151,6 +2187,25 @@ async def accept_sow(
         request_id=request_id,
         ip_address=ip_address,
     )
+    if before["company_id"] is None:
+        # §17: an accepted individual SOW automatically gains its engagement
+        # contract, so it can never be an orphan that cannot become executable.
+        # Local import: contracts.py already imports from this module.
+        role_count = (
+            await conn.execute(
+                text("SELECT count(*) FROM public.sow_roles WHERE sow_id = :sid"),
+                {"sid": before["id"]},
+            )
+        ).scalar()
+        if int(role_count or 0) > 0:
+            from app.services import contracts as contract_service
+
+            await contract_service.create_personal_contract_from_sow(
+                conn,
+                sow_public_id=public_id,
+                owner_user_id=uuid.UUID(str(before["created_by"])),
+                request_id=request_id,
+            )
     return await _get_sow_after_decision(conn, public_id=public_id)
 
 

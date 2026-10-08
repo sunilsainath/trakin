@@ -1055,6 +1055,23 @@ async def read_personal_sow(ctx_and_conn: PersonalContext, sow_id: str) -> dict[
 
 
 @router.post(
+    "/personal-sows/{sow_id}/submit",
+    response_model=SowResponse,
+    summary="Submit a personal SOW for acceptance",
+)
+async def submit_personal_sow(ctx_and_conn: PersonalContext, sow_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await code_service.submit_personal_sow(
+        conn,
+        user_id=ctx.user_id,
+        public_id=sow_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.post(
     "/personal-sows/{sow_id}/accept",
     response_model=SowResponse,
     summary="Accept a personal SOW",
@@ -1091,4 +1108,139 @@ async def reject_personal_sow(
         ip_address=ctx.ip_address,
         reason=str(payload.reason or ""),
         notes=payload.notes,
+    )
+
+
+# =============================================================================
+# personal contracts — one engagement per assignment, owned by the creator
+# =============================================================================
+@router.post(
+    "/personal-contracts",
+    response_model=ContractResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a personal contract from a personal SOW",
+)
+async def create_personal_contract(
+    ctx_and_conn: PersonalContext, payload: CreateContractRequest
+) -> dict[str, Any]:
+    """Each actual assignment gets its own contract under the caller's SOW."""
+    ctx, conn = ctx_and_conn
+    body = payload.model_dump()
+    return await contract_service.create_personal_contract(
+        conn,
+        user_id=ctx.user_id,
+        sow_public_id=str(body.pop("sow_id")),
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        payload=body,
+    )
+
+
+@router.get(
+    "/personal-contracts",
+    response_model=Page[ContractResponse],
+    summary="List my personal contracts",
+)
+async def list_personal_contracts(
+    ctx_and_conn: PersonalContext, limit: int = Query(50, ge=1, le=200)
+) -> Page[Any]:
+    ctx, conn = ctx_and_conn
+    page_size = clamp_limit(limit, default=50, maximum=200)
+    rows = await contract_service.list_personal_contracts(
+        conn, user_id=ctx.user_id, limit=page_size
+    )
+    return build_page(rows, limit=page_size, cursor_keys=("created_at",), request_id=ctx.request_id)
+
+
+@router.get(
+    "/personal-contracts/{contract_id}",
+    response_model=ContractResponse,
+    summary="Read one personal contract",
+)
+async def read_personal_contract(ctx_and_conn: PersonalContext, contract_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await contract_service.get_personal_contract(
+        conn, user_id=ctx.user_id, public_id=contract_id
+    )
+
+
+@router.post(
+    "/personal-contracts/{contract_id}/send",
+    response_model=ContractResponse,
+    summary="Send a personal contract to its counterparty",
+)
+async def send_personal_contract(ctx_and_conn: PersonalContext, contract_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await contract_service.transition_personal_contract(
+        conn,
+        user_id=ctx.user_id,
+        public_id=contract_id,
+        target="SENT",
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.post(
+    "/personal-contracts/{contract_id}/accept",
+    response_model=ContractResponse,
+    summary="Accept a personal contract as its counterparty",
+)
+async def accept_personal_contract(
+    ctx_and_conn: PersonalContext, contract_id: str
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await contract_service.respond_to_contract(
+        conn,
+        company_id=None,
+        public_id=contract_id,
+        accept=True,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        notes=None,
+    )
+
+
+@router.post(
+    "/personal-contracts/{contract_id}/decline",
+    response_model=ContractResponse,
+    summary="Decline a personal contract with a reason",
+)
+async def decline_personal_contract(
+    ctx_and_conn: PersonalContext, contract_id: str, payload: ContractActionRequest | None = None
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await contract_service.respond_to_contract(
+        conn,
+        company_id=None,
+        public_id=contract_id,
+        accept=False,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        notes=payload.notes if payload else None,
+    )
+
+
+@router.post(
+    "/personal-contracts/{contract_id}/terminate",
+    response_model=ContractResponse,
+    summary="Terminate a personal contract with a reason",
+)
+async def terminate_personal_contract(
+    ctx_and_conn: PersonalContext, contract_id: str, payload: ContractActionRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await contract_service.transition_personal_contract(
+        conn,
+        user_id=ctx.user_id,
+        public_id=contract_id,
+        target="TERMINATED",
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        reason=payload.reason,
     )
