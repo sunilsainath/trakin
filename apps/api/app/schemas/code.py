@@ -115,7 +115,8 @@ class UpdateProjectRequest(_Strict):
 
 class ProjectResponse(BaseModel):
     public_id: PublicId
-    company_id: PublicId
+    # None for personal (INDIVIDUAL) projects, which belong to no company.
+    company_id: PublicId | None = None
     name: str
     description: str | None = None
     project_type: str

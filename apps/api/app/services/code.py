@@ -36,6 +36,7 @@ from app.services.lookup import (
     as_decimal,
     json_or_empty,
     resolve_company_public_id,
+    resolve_personal,
     resolve_scoped,
     resolve_user_public_id,
 )
@@ -101,6 +102,19 @@ def _assert_transition(
                 "allowed": list(graph.get(current, ())),
             },
         )
+
+
+#: Project lifecycle (§10). Terminal states are read-only: COMPLETED,
+#: CANCELLED and CLOSED accept no further transition.
+PROJECT_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "DRAFT": ("PLANNING", "ACTIVE", "CANCELLED"),
+    "PLANNING": ("ACTIVE", "CANCELLED"),
+    "ACTIVE": ("ON_HOLD", "COMPLETED", "CANCELLED"),
+    "ON_HOLD": ("ACTIVE", "CANCELLED"),
+    "COMPLETED": (),
+    "CANCELLED": (),
+    "CLOSED": (),
+}
 
 
 def _num(value: Any) -> float:
@@ -416,7 +430,16 @@ async def update_project(
 ) -> dict[str, Any]:
     before = await resolve_scoped(conn, "projects", public_id, company_id, columns="*", lock=True)
 
+    current_status = str(before.get("status") or "")
+    if current_status in {"COMPLETED", "CANCELLED", "CLOSED"}:
+        raise InvalidStateTransitionError(
+            f"A project in status {current_status} is read-only.",
+            details={"status": current_status, "allowed": []},
+        )
+
     updates = {k: v for k, v in changes.items() if k in _PROJECT_UPDATABLE and v is not None}
+    if "status" in updates and str(updates["status"]) != current_status:
+        _assert_transition(PROJECT_TRANSITIONS, current_status, str(updates["status"]), "project")
     if "owner_user_id" in updates:
         updates["owner_user_id"] = await resolve_user_public_id(
             conn, str(updates["owner_user_id"]), company_id=company_id
@@ -1458,3 +1481,355 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}
     return value
+
+
+# =============================================================================
+# personal (INDIVIDUAL) projects — no company, owned by the caller
+# =============================================================================
+_PERSONAL_PROJECT_SELECT = """
+    SELECT p.id, p.public_id, p.company_id, p.name, p.description, p.project_type,
+           p.category, p.status, p.start_date, p.estimated_end_date, p.estimated_hours,
+           p.estimated_budget, p.currency, p.billing_basis, p.billing_frequency,
+           p.payment_terms_days, p.health_score, p.owner_user_id, p.metadata,
+           p.created_at, p.updated_at,
+           ou.public_id AS owner_public_id,
+           NULLIF(TRIM(ou.first_name || ' ' || ou.last_name), '') AS owner_name,
+           COALESCE(pr.role_count, 0)      AS role_count,
+           COALESCE(pr.open_role_count, 0)  AS open_role_count,
+           0 AS sow_count, 0 AS contract_count, 0 AS active_contract_count,
+           0 AS invoiced_total, 0 AS outstanding_total,
+           0 AS timesheet_count, 0 AS team_size,
+           p.updated_at AS last_activity_at
+      FROM public.projects p
+      LEFT JOIN public.users ou ON ou.id = p.owner_user_id
+      LEFT JOIN LATERAL (
+            SELECT count(*) AS role_count,
+                   count(*) FILTER (WHERE status = 'OPEN' AND allocated_count < required_count)
+                       AS open_role_count
+              FROM public.project_roles r WHERE r.project_id = p.id AND r.deleted_at IS NULL
+      ) pr ON TRUE
+"""
+
+
+def _personal_from_row(row: Any) -> dict[str, Any]:
+    data = _project_from_row(row, "")
+    data["company_id"] = None
+    return data
+
+
+async def create_personal_project(
+    conn: AsyncConnection,
+    *,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Create an INDIVIDUAL project owned by the caller, in no company.
+
+    Personal projects cannot name a company counterparty or a separate owner:
+    there is no tenant to resolve them against.
+    """
+    if payload.get("counterparty_company_id"):
+        raise ValidationError(
+            "A personal project cannot name a company counterparty.",
+            details={"reason": "PERSONAL_NO_COMPANY"},
+        )
+    if payload.get("owner_user_id"):
+        raise ValidationError(
+            "A personal project is always owned by its creator.",
+            details={"reason": "PERSONAL_SELF_OWNED"},
+        )
+
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.projects
+                      (company_id, name, description, project_type, category, status,
+                       start_date, estimated_end_date, estimated_hours, estimated_budget,
+                       currency, billing_basis, billing_frequency, payment_terms_days,
+                       owner_user_id, metadata, created_by)
+                    VALUES
+                      (NULL, :name, :description, :project_type, 'INDIVIDUAL', :status,
+                       :start_date, :estimated_end_date, :estimated_hours, :estimated_budget,
+                       :currency, :billing_basis, :billing_frequency, :payment_terms_days,
+                       :owner, CAST(:metadata AS jsonb), :actor)
+                    RETURNING public_id
+                    """
+                ),
+                {
+                    "name": payload["name"],
+                    "description": payload.get("description"),
+                    "project_type": payload.get("project_type", "SERVICE"),
+                    "status": payload.get("status", "DRAFT"),
+                    "start_date": payload.get("start_date"),
+                    "estimated_end_date": payload.get("estimated_end_date"),
+                    "estimated_hours": payload.get("estimated_hours"),
+                    "estimated_budget": payload.get("estimated_budget"),
+                    "currency": payload.get("currency", "USD"),
+                    "billing_basis": payload.get("billing_basis", "TIMESHEET"),
+                    "billing_frequency": payload.get("billing_frequency", "MONTHLY"),
+                    "payment_terms_days": payload.get("payment_terms_days", 30),
+                    "owner": actor_user_id,
+                    "metadata": _json(payload.get("metadata") or {}),
+                    "actor": actor_user_id,
+                },
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+    await audit.record(
+        conn,
+        action="project.created",
+        resource_type="project",
+        resource_public_id=str(row["public_id"]),
+        actor_user_id=actor_user_id,
+        new_values={"name": payload["name"], "category": "INDIVIDUAL"},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await get_personal_project(conn, user_id=actor_user_id, public_id=str(row["public_id"]))
+
+
+async def list_personal_projects(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    search: str | None,
+    status: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    where = ["p.company_id IS NULL", "p.owner_user_id = :uid", "p.deleted_at IS NULL"]
+    params: dict[str, Any] = {"uid": user_id, "limit": limit + 1}
+    if search:
+        where.append("(p.name ILIKE :q OR p.description ILIKE :q)")
+        params["q"] = f"%{search}%"
+    if status:
+        where.append("p.status = :status")
+        params["status"] = status
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    f"""
+                    {_PERSONAL_PROJECT_SELECT}
+                     WHERE {" AND ".join(where)}
+                     ORDER BY p.created_at DESC, p.public_id DESC
+                     LIMIT :limit
+                    """
+                ),
+                params,
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [_personal_from_row(r) for r in rows]
+
+
+async def get_personal_project(
+    conn: AsyncConnection, *, user_id: uuid.UUID, public_id: str
+) -> dict[str, Any]:
+    row = (
+        (
+            await conn.execute(
+                text(
+                    f"""{_PERSONAL_PROJECT_SELECT}
+                     WHERE p.public_id = :pid AND p.company_id IS NULL
+                       AND p.owner_user_id = :uid AND p.deleted_at IS NULL"""
+                ),
+                {"pid": public_id, "uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Project not found.")
+    return _personal_from_row(row)
+
+
+async def update_personal_project(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    before = await resolve_personal(conn, "projects", public_id, user_id, lock=True)
+
+    current_status = str(before.get("status") or "")
+    if current_status in {"COMPLETED", "CANCELLED", "CLOSED"}:
+        raise InvalidStateTransitionError(
+            f"A project in status {current_status} is read-only.",
+            details={"status": current_status, "allowed": []},
+        )
+
+    updates = {k: v for k, v in changes.items() if k in _PROJECT_UPDATABLE and v is not None}
+    updates.pop("owner_user_id", None)
+    if "status" in updates and str(updates["status"]) != current_status:
+        _assert_transition(PROJECT_TRANSITIONS, current_status, str(updates["status"]), "project")
+    if "metadata" in updates:
+        updates["metadata"] = _json(updates["metadata"])
+
+    if updates:
+        assignments = ", ".join(f"{col} = :{col}" for col in updates)
+        await conn.execute(
+            text(f"UPDATE public.projects SET {assignments} WHERE id = :rid"),  # noqa: S608
+            {**updates, "rid": before["id"]},
+        )
+
+    after = await get_personal_project(conn, user_id=user_id, public_id=public_id)
+    await audit.record(
+        conn,
+        action="project.updated",
+        resource_type="project",
+        resource_id=before["id"],
+        resource_public_id=public_id,
+        actor_user_id=actor_user_id,
+        old_values={k: _jsonable(before.get(k)) for k in updates},
+        new_values={k: _jsonable(after.get(k)) for k in updates},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return after
+
+
+async def create_personal_project_role(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    project_public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    project = await resolve_personal(conn, "projects", project_public_id, user_id)
+
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.project_roles
+                      (project_id, company_id, title, description, required_count,
+                       required_skills, seniority, min_hourly_rate, max_hourly_rate,
+                       cost_rate, currency, billing_basis, allocation_pct,
+                       start_date, end_date, status, created_by)
+                    VALUES
+                      (:pid, NULL, :title, :description, :required_count,
+                       CAST(:skills AS text[]), :seniority, :min_rate, :max_rate,
+                       :cost_rate, :currency, :billing_basis, :allocation,
+                       :start_date, :end_date, :status, :actor)
+                    RETURNING public_id, id
+                    """
+                ),
+                {
+                    "pid": project["id"],
+                    "title": payload["title"],
+                    "description": payload.get("description"),
+                    "required_count": payload.get("required_count", 1),
+                    "skills": _text_array(payload.get("required_skills") or []),
+                    "seniority": payload.get("seniority"),
+                    "min_rate": payload.get("min_hourly_rate"),
+                    "max_rate": payload.get("max_hourly_rate"),
+                    "cost_rate": payload.get("cost_rate"),
+                    "currency": payload.get("currency", "USD"),
+                    "billing_basis": payload.get("billing_basis", "TIMESHEET"),
+                    "allocation": payload.get("allocation_pct", 100),
+                    "start_date": payload.get("start_date"),
+                    "end_date": payload.get("end_date"),
+                    "status": payload.get("status", "OPEN"),
+                    "actor": actor_user_id,
+                },
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+    await conn.execute(
+        text("SELECT app.refresh_role_allocation(CAST(:rid AS uuid))"), {"rid": row["id"]}
+    )
+
+    await audit.record(
+        conn,
+        action="project_role.created",
+        resource_type="project_role",
+        resource_public_id=str(row["public_id"]),
+        actor_user_id=actor_user_id,
+        new_values={
+            "project_id": project_public_id,
+            "title": payload["title"],
+            "required_count": payload.get("required_count", 1),
+        },
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await get_personal_project_role(conn, user_id=user_id, public_id=str(row["public_id"]))
+
+
+async def list_personal_project_roles(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    project_public_id: str | None = None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    where = ["r.company_id IS NULL", "r.deleted_at IS NULL", "p.owner_user_id = :uid"]
+    params: dict[str, Any] = {"uid": user_id, "limit": limit + 1}
+    if project_public_id:
+        project = await resolve_personal(conn, "projects", project_public_id, user_id)
+        where.append("r.project_id = :pid")
+        params["pid"] = project["id"]
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    f"""
+                    {_ROLE_SELECT}
+                     WHERE {" AND ".join(where)}
+                     ORDER BY r.public_id ASC
+                     LIMIT :limit
+                    """
+                ),
+                params,
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [_role_from_row(r) for r in rows]
+
+
+async def get_personal_project_role(
+    conn: AsyncConnection, *, user_id: uuid.UUID, public_id: str
+) -> dict[str, Any]:
+    row = (
+        (
+            await conn.execute(
+                text(
+                    f"""{_ROLE_SELECT}
+                     WHERE r.public_id = :pid AND r.company_id IS NULL
+                       AND r.deleted_at IS NULL
+                       AND EXISTS (SELECT 1 FROM public.projects p
+                                    WHERE p.id = r.project_id AND p.company_id IS NULL
+                                      AND p.owner_user_id = :uid)"""  # noqa: S608
+                ),
+                {"pid": public_id, "uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Project role not found.")
+    return _role_from_row(row)

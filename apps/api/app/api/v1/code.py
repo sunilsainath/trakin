@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.api.deps import RequestContext, company_scope, require_permission
+from app.api.deps import RequestContext, company_scope, require_permission, require_user
 from app.core.logging import get_logger
 from app.schemas.code import (
     ContractActionRequest,
@@ -855,4 +855,119 @@ async def contract_versions(ctx_and_conn: ContractsRead, contract_id: str) -> li
     ctx, conn = ctx_and_conn
     return await contract_service.contract_versions(
         conn, company_id=company_scope(ctx), public_id=contract_id
+    )
+
+
+# =============================================================================
+# personal (INDIVIDUAL) projects — any signed-in user, no company required
+# =============================================================================
+PersonalContext = Annotated[tuple[RequestContext, AsyncConnection], Depends(require_user)]
+
+
+@router.post(
+    "/personal-projects",
+    response_model=ProjectResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a personal project",
+)
+async def create_personal_project(
+    ctx_and_conn: PersonalContext, payload: CreateProjectRequest
+) -> dict[str, Any]:
+    """An INDIVIDUAL project owned by the caller. No company, no membership,
+    no permission check beyond authentication — ownership is the authorization."""
+    ctx, conn = ctx_and_conn
+    return await code_service.create_personal_project(
+        conn,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        payload=payload.model_dump(),
+    )
+
+
+@router.get(
+    "/personal-projects",
+    response_model=Page[ProjectResponse],
+    summary="List my personal projects",
+)
+async def list_personal_projects(
+    ctx_and_conn: PersonalContext,
+    search: str | None = Query(None, max_length=200),
+    status_filter: str | None = Query(None, alias="status", max_length=32),
+    limit: int = Query(50, ge=1, le=200),
+) -> Page[Any]:
+    ctx, conn = ctx_and_conn
+    page_size = clamp_limit(limit, default=50, maximum=200)
+    rows = await code_service.list_personal_projects(
+        conn,
+        user_id=ctx.user_id,
+        search=search,
+        status=status_filter,
+        limit=page_size,
+    )
+    return build_page(rows, limit=page_size, cursor_keys=("created_at",), request_id=ctx.request_id)
+
+
+@router.get(
+    "/personal-projects/{project_id}",
+    response_model=ProjectResponse,
+    summary="Read one personal project",
+)
+async def read_personal_project(ctx_and_conn: PersonalContext, project_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await code_service.get_personal_project(conn, user_id=ctx.user_id, public_id=project_id)
+
+
+@router.patch(
+    "/personal-projects/{project_id}",
+    response_model=ProjectResponse,
+    summary="Update a personal project",
+)
+async def update_personal_project(
+    ctx_and_conn: PersonalContext, project_id: str, payload: UpdateProjectRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await code_service.update_personal_project(
+        conn,
+        user_id=ctx.user_id,
+        public_id=project_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        changes=payload.model_dump(exclude_unset=True),
+    )
+
+
+@router.post(
+    "/personal-projects/{project_id}/roles",
+    response_model=ProjectRoleResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a role to a personal project",
+)
+async def create_personal_project_role(
+    ctx_and_conn: PersonalContext, project_id: str, payload: CreateProjectRoleRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await code_service.create_personal_project_role(
+        conn,
+        user_id=ctx.user_id,
+        project_public_id=project_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        payload=payload.model_dump(),
+    )
+
+
+@router.get(
+    "/personal-projects/{project_id}/roles",
+    response_model=list[ProjectRoleResponse],
+    summary="List a personal project's roles",
+)
+async def list_personal_project_roles(
+    ctx_and_conn: PersonalContext, project_id: str, limit: int = Query(100, ge=1, le=200)
+) -> list[dict[str, Any]]:
+    ctx, conn = ctx_and_conn
+    return await code_service.list_personal_project_roles(
+        conn, user_id=ctx.user_id, project_public_id=project_id, limit=limit
     )

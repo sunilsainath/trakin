@@ -122,6 +122,52 @@ async def resolve_scoped(
     return dict(row)
 
 
+async def resolve_personal(
+    conn: AsyncConnection,
+    table: str,
+    public_id: str,
+    user_id: uuid.UUID,
+    *,
+    columns: str = "*",
+    lock: bool = False,
+) -> dict[str, Any]:
+    """Fetch one *personal* (company-less) row by public id, or raise 404.
+
+    Mirrors `resolve_scoped` for the INDIVIDUAL world: the row must belong to
+    no company and be owned by the caller (roles inherit ownership through
+    their parent project). A foreign or company row is indistinguishable from
+    a missing one.
+    """
+    _assert_table(table)
+    if not public_id or len(public_id) > 64:
+        raise ResourceNotFoundError()
+
+    if table == "projects":
+        sql = (
+            f"SELECT {columns} FROM public.projects "  # noqa: S608 - table is allowlisted
+            "WHERE public_id = :pid AND company_id IS NULL AND owner_user_id = :uid"
+        )
+        params: dict[str, Any] = {"pid": public_id, "uid": user_id}
+    elif table == "project_roles":
+        selection = "r.*" if columns.strip() == "*" else columns
+        sql = (
+            f"SELECT {selection} FROM public.project_roles r "  # noqa: S608 - table is allowlisted
+            "JOIN public.projects p ON p.id = r.project_id "
+            "WHERE r.public_id = :pid AND r.company_id IS NULL "
+            "AND p.company_id IS NULL AND p.owner_user_id = :uid"
+        )
+        params = {"pid": public_id, "uid": user_id}
+    else:
+        raise ResourceNotFoundError("Unknown resource type.")
+    if lock:
+        sql += " FOR UPDATE"
+
+    row = (await conn.execute(text(sql), params)).mappings().first()
+    if row is None:
+        raise ResourceNotFoundError()
+    return dict(row)
+
+
 async def resolve_by_id(
     conn: AsyncConnection,
     table: str,
