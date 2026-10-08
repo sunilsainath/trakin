@@ -61,8 +61,9 @@ CONTRACT_TRANSITIONS: dict[str, tuple[str, ...]] = {
 
 SOW_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "DRAFT": ("PENDING_APPROVAL", "CLOSED"),
-    "PENDING_APPROVAL": ("ACTIVE", "DRAFT", "CLOSED"),
+    "PENDING_APPROVAL": ("ACTIVE", "REJECTED", "DRAFT", "CLOSED"),
     "ACTIVE": ("EXPIRED", "TERMINATED", "CLOSED"),
+    "REJECTED": ("DRAFT", "CLOSED"),
     "EXPIRED": ("CLOSED",),
     "TERMINATED": ("CLOSED",),
     "CLOSED": (),
@@ -898,7 +899,10 @@ _SOW_SELECT = """
            s.billing_basis, s.billing_frequency, s.invoice_frequency,
            s.payment_terms_days, s.payment_method, s.special_conditions,
            s.max_total_amount, s.auto_generate_contracts, s.approved_by,
-           s.approved_at, s.document_id, s.created_at, s.updated_at,
+           s.approved_at, s.rejected_at, s.reject_reason,
+           ua.public_id AS approved_by_public_id,
+           ur.public_id AS rejected_by_public_id,
+           s.document_id, s.created_at, s.updated_at,
            p.public_id AS project_public_id, p.name AS project_name,
            cp.public_id AS counterparty_company_public_id,
                    COALESCE(cp.display_name, cp.legal_name) AS counterparty_company_name,
@@ -911,6 +915,8 @@ _SOW_SELECT = """
       JOIN public.projects p ON p.id = s.project_id
       LEFT JOIN public.companies cp ON cp.id = s.counterparty_company_id
       LEFT JOIN public.users cu ON cu.id = s.counterparty_user_id
+      LEFT JOIN public.users ua ON ua.id = s.approved_by
+      LEFT JOIN public.users ur ON ur.id = s.rejected_by
       LEFT JOIN LATERAL (
             SELECT count(*) AS contract_count,
                    array_agg(c.public_id ORDER BY c.created_at) AS contract_ids
@@ -934,7 +940,8 @@ def _sow_from_row(row: Any) -> dict[str, Any]:
     data["scope"] = meta.get("scope")
     data["deliverables"] = meta.get("deliverables") or []
     data["milestones"] = meta.get("milestones") or []
-    data["approved_by"] = None
+    data["approved_by"] = data.pop("approved_by_public_id", None)
+    data["rejected_by"] = data.pop("rejected_by_public_id", None)
     return data
 
 
@@ -962,7 +969,7 @@ async def _sow_roles(conn: AsyncConnection, sow_id: uuid.UUID) -> list[dict[str,
 
 
 async def _sow_history(
-    conn: AsyncConnection, public_id: str, company_id: uuid.UUID
+    conn: AsyncConnection, public_id: str, company_id: uuid.UUID | None
 ) -> list[dict[str, Any]]:
     rows = (
         (
@@ -976,7 +983,7 @@ async def _sow_history(
                       LEFT JOIN public.users u ON u.id = a.actor_user_id
                      WHERE a.resource_type = 'sow'
                        AND a.resource_public_id = :pid
-                       AND a.company_id = :cid
+                       AND a.company_id IS NOT DISTINCT FROM CAST(:cid AS uuid)
                      ORDER BY a.occurred_at DESC
                      LIMIT 100
                     """
@@ -1833,3 +1840,383 @@ async def get_personal_project_role(
     if row is None:
         raise ResourceNotFoundError("Project role not found.")
     return _role_from_row(row)
+
+
+# =============================================================================
+# personal (INDIVIDUAL) SOWs + acceptance with capture
+# =============================================================================
+async def _resolve_personal_role_ids(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+    requested: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Personal twin of `_resolve_project_role_ids`: only roles of this owned,
+    company-less project are accepted."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in requested:
+        role_public_id = item["project_role_id"]
+        if role_public_id in seen:
+            raise ValidationError(
+                "The same project role appears twice.", details={"project_role_id": role_public_id}
+            )
+        seen.add(role_public_id)
+
+        role = await resolve_personal(conn, "project_roles", role_public_id, user_id)
+        if str(role["project_id"]) != str(project_id):
+            raise BusinessRuleViolationError(
+                "That role does not belong to this project.",
+                details={
+                    "project_role_id": role_public_id,
+                    "reason": "PROJECT_ROLE_NOT_ON_PROJECT",
+                },
+            )
+        out.append({**item, "project_role_id": role["id"]})
+    return out
+
+
+async def create_personal_sow(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    project_public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a SOW under the caller's own personal project.
+
+    The counterparty may be another user (INDIVIDUAL) or, when the caller also
+    belongs to a company, that company — but the SOW itself stays personal.
+    """
+    project = await resolve_personal(conn, "projects", project_public_id, user_id)
+
+    counterparty_company = None
+    if payload.get("counterparty_company_id"):
+        counterparty_company = await resolve_company_public_id(
+            conn, payload["counterparty_company_id"]
+        )
+    counterparty_user = None
+    if payload.get("counterparty_user_id"):
+        counterparty_user = await resolve_user_public_id(conn, payload["counterparty_user_id"])
+    if counterparty_company is None and counterparty_user is None:
+        raise ValidationError(
+            "A personal SOW names who the work is for: a counterparty user or company.",
+            details={"reason": "COUNTERPARTY_REQUIRED"},
+        )
+
+    metadata = {
+        "scope": payload.get("scope"),
+        "deliverables": payload.get("deliverables") or [],
+        "milestones": payload.get("milestones") or [],
+    }
+
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO public.sows
+                      (project_id, company_id, sow_type, counterparty_company_id,
+                       counterparty_user_id, title, description, status, start_date, end_date,
+                       currency, default_rate, billing_basis, billing_frequency,
+                       invoice_frequency, payment_terms_days, payment_method,
+                       special_conditions, max_total_amount, auto_generate_contracts,
+                       document_id, metadata, created_by)
+                    VALUES
+                      (:pid, NULL, :sow_type, :counterparty_company,
+                       :counterparty_user, :title, :description, 'DRAFT', :start_date, :end_date,
+                       :currency, :default_rate, :billing_basis, :billing_frequency,
+                       :invoice_frequency, :payment_terms_days, :payment_method,
+                       :special_conditions, :max_total_amount, :auto_generate,
+                       :document_id, CAST(:metadata AS jsonb), :actor)
+                    RETURNING public_id
+                    """
+                ),
+                {
+                    "pid": project["id"],
+                    "sow_type": payload.get("sow_type", "INDIVIDUAL"),
+                    "counterparty_company": counterparty_company,
+                    "counterparty_user": counterparty_user,
+                    "title": payload["title"],
+                    "description": payload.get("description"),
+                    "start_date": payload.get("start_date"),
+                    "end_date": payload.get("end_date"),
+                    "currency": payload.get("currency", "USD"),
+                    "default_rate": payload.get("default_rate"),
+                    "billing_basis": payload.get("billing_basis", "TIMESHEET"),
+                    "billing_frequency": payload.get("billing_frequency", "MONTHLY"),
+                    "invoice_frequency": payload.get("invoice_frequency", "MONTHLY"),
+                    "payment_terms_days": payload.get("payment_terms_days", 30),
+                    "payment_method": payload.get("payment_method"),
+                    "special_conditions": payload.get("special_conditions"),
+                    "max_total_amount": payload.get("max_total_amount"),
+                    "auto_generate": payload.get("auto_generate_contracts", True),
+                    "document_id": None,
+                    "metadata": _json(metadata),
+                    "actor": actor_user_id,
+                },
+            )
+        )
+        .mappings()
+        .first()
+    )
+
+    created = await resolve_personal(conn, "sows", str(row["public_id"]), user_id, columns="id")
+    await _replace_sow_roles(
+        conn,
+        sow_id=uuid.UUID(str(created["id"])),
+        requested=await _resolve_personal_role_ids(
+            conn,
+            user_id=user_id,
+            project_id=uuid.UUID(str(project["id"])),
+            requested=payload.get("roles") or [],
+        ),
+    )
+
+    await audit.record(
+        conn,
+        action="sow.created",
+        resource_type="sow",
+        resource_public_id=str(row["public_id"]),
+        actor_user_id=actor_user_id,
+        new_values={"project_id": project_public_id, "title": payload["title"]},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await get_personal_sow(conn, user_id=user_id, public_id=str(row["public_id"]))
+
+
+async def list_personal_sows(
+    conn: AsyncConnection,
+    *,
+    user_id: uuid.UUID,
+    project_public_id: str | None,
+    status: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    where = ["s.company_id IS NULL", "s.created_by = :uid", "s.deleted_at IS NULL"]
+    params: dict[str, Any] = {"uid": user_id, "limit": limit + 1}
+    if project_public_id:
+        project = await resolve_personal(conn, "projects", project_public_id, user_id)
+        where.append("s.project_id = :pid")
+        params["pid"] = project["id"]
+    if status:
+        where.append("s.status = :status")
+        params["status"] = status
+    rows = (
+        (
+            await conn.execute(
+                text(
+                    f"""
+                    {_SOW_SELECT}
+                     WHERE {" AND ".join(where)}
+                     ORDER BY s.updated_at DESC, s.public_id DESC
+                     LIMIT :limit
+                    """
+                ),
+                params,
+            )
+        )
+        .mappings()
+        .all()
+    )
+    out = []
+    for r in rows:
+        data = _sow_from_row(r)
+        data["roles"] = await _sow_roles(conn, r["id"])
+        out.append(data)
+    return out
+
+
+async def get_personal_sow(
+    conn: AsyncConnection, *, user_id: uuid.UUID, public_id: str, with_history: bool = False
+) -> dict[str, Any]:
+    row = (
+        (
+            await conn.execute(
+                text(
+                    f"""{_SOW_SELECT}
+                     WHERE s.public_id = :pid AND s.company_id IS NULL
+                       AND s.created_by = :uid AND s.deleted_at IS NULL"""
+                ),
+                {"pid": public_id, "uid": user_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("SOW not found.")
+    data = _sow_from_row(row)
+    data["roles"] = await _sow_roles(conn, row["id"])
+    data["contract_count"] = int(row["contract_count"] or 0)
+    data["contract_ids"] = list(row["contract_ids"] or [])
+    if with_history:
+        data["history"] = await _sow_history(conn, public_id, None)
+    return data
+
+
+async def _resolve_sow_for_decision(
+    conn: AsyncConnection,
+    *,
+    public_id: str,
+    user_id: uuid.UUID,
+    company_id: uuid.UUID | None,
+) -> dict[str, Any]:
+    """Fetch a SOW the caller may accept or reject: owner, counterparty member,
+    counterparty user, or personal owner. Anything else is a 404."""
+    row = (
+        (
+            await conn.execute(
+                text(
+                    """
+                    SELECT s.id, s.public_id, s.status, s.company_id,
+                           s.counterparty_company_id, s.counterparty_user_id,
+                           s.created_by, s.rejected_by, s.rejected_at, s.reject_reason
+                      FROM public.sows s
+                     WHERE s.public_id = :pid AND s.deleted_at IS NULL
+                    """
+                ),
+                {"pid": public_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ResourceNotFoundError("SOW not found.")
+    data = dict(row)
+
+    allowed = False
+    if data["company_id"] is None:
+        allowed = str(data["created_by"]) == str(user_id) or str(
+            data["counterparty_user_id"] or ""
+        ) == str(user_id)
+    elif company_id is not None and str(data["company_id"]) == str(company_id):
+        allowed = True
+    elif data["counterparty_company_id"] is not None:
+        member = await conn.execute(
+            text("SELECT app.is_member(CAST(:cid AS uuid))"),
+            {"cid": data["counterparty_company_id"]},
+        )
+        allowed = bool(member.scalar())
+    elif data["counterparty_user_id"] is not None:
+        allowed = str(data["counterparty_user_id"]) == str(user_id)
+    if not allowed:
+        raise ResourceNotFoundError("SOW not found.")
+    return data
+
+
+async def accept_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID | None,
+    user_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    """Accept a SOW as its counterparty. Captures who accepted and when."""
+    before = await _resolve_sow_for_decision(
+        conn, public_id=public_id, user_id=user_id, company_id=company_id
+    )
+    current = str(before["status"])
+    if current != "PENDING_APPROVAL":
+        raise InvalidStateTransitionError(
+            f"A SOW in status {current} cannot be accepted.",
+            details={"status": current, "acceptable_in": ["PENDING_APPROVAL"]},
+        )
+    await conn.execute(
+        text(
+            "UPDATE public.sows SET status = 'ACTIVE', approved_by = :actor,"
+            " approved_at = now() WHERE id = :rid"
+        ),
+        {"actor": actor_user_id, "rid": before["id"]},
+    )
+    await audit.record(
+        conn,
+        action="sow.accepted",
+        resource_type="sow",
+        resource_id=before["id"],
+        resource_public_id=public_id,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        old_values={"status": current},
+        new_values={"status": "ACTIVE"},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await _get_sow_after_decision(conn, public_id=public_id)
+
+
+async def reject_sow(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID | None,
+    user_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    reason: str,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Reject a SOW. The row is kept with rejected-by/at/reason — never deleted."""
+    if not (reason or "").strip():
+        raise ValidationError(
+            "A reason is required to reject a SOW.", details={"reason": "REASON_REQUIRED"}
+        )
+    before = await _resolve_sow_for_decision(
+        conn, public_id=public_id, user_id=user_id, company_id=company_id
+    )
+    current = str(before["status"])
+    if current != "PENDING_APPROVAL":
+        raise InvalidStateTransitionError(
+            f"A SOW in status {current} cannot be rejected.",
+            details={"status": current, "rejectable_in": ["PENDING_APPROVAL"]},
+        )
+    await conn.execute(
+        text(
+            "UPDATE public.sows SET status = 'REJECTED', rejected_by = :actor,"
+            " rejected_at = now(), reject_reason = :reason WHERE id = :rid"
+        ),
+        {"actor": actor_user_id, "reason": reason.strip(), "rid": before["id"]},
+    )
+    await audit.record(
+        conn,
+        action="sow.rejected",
+        resource_type="sow",
+        resource_id=before["id"],
+        resource_public_id=public_id,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        old_values={"status": current},
+        new_values={"status": "REJECTED", "reason": reason.strip(), "notes": notes},
+        reason=reason.strip(),
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await _get_sow_after_decision(conn, public_id=public_id)
+
+
+async def _get_sow_after_decision(conn: AsyncConnection, *, public_id: str) -> dict[str, Any]:
+    row = (
+        (
+            await conn.execute(
+                text(f"{_SOW_SELECT} WHERE s.public_id = :pid"),
+                {"pid": public_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:  # pragma: no cover - the row was just updated
+        raise ResourceNotFoundError("SOW not found.")
+    data = _sow_from_row(row)
+    data["roles"] = await _sow_roles(conn, row["id"])
+    return data

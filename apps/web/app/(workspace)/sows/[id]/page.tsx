@@ -56,7 +56,9 @@ export default function SowDetailPage() {
     enabled: tab === 'history',
   })
 
-  const [dialog, setDialog] = React.useState<'submit' | 'approve' | 'reject' | 'terminate' | null>(null)
+  const [dialog, setDialog] = React.useState<
+    'submit' | 'approve' | 'reject' | 'reopen' | 'terminate' | null
+  >(null)
 
   const act = useCompanyMutation<Sow, { path: string; reason: string | null }>({
     context: { companyPublicId: activeCompanyPublicId },
@@ -116,7 +118,15 @@ export default function SowDetailPage() {
   const reject = (notes: string | null) =>
     act
       .mutateAsync({ path: `/sows/${sowId}/reject`, reason: notes })
-      .catch((cause) => notifyError(cause, 'The SOW could not be returned.'))
+      .catch((cause) => notifyError(cause, 'The SOW could not be rejected.'))
+
+  const reopen = async () => {
+    try {
+      await act.mutateAsync({ path: `/sows/${sowId}/reopen`, reason: null })
+    } catch (cause) {
+      notifyError(cause, 'The SOW could not be reopened.')
+    }
+  }
 
   const terminate = (reason: string) =>
     act
@@ -154,9 +164,14 @@ export default function SowDetailPage() {
                     Approve
                   </Button>
                   <Button variant="outline" size="sm" onClick={() => setDialog('reject')}>
-                    Return to draft
+                    Reject
                   </Button>
                 </>
+              ) : null}
+              {can('sows.update') && data.status === 'REJECTED' ? (
+                <Button variant="outline" size="sm" onClick={() => setDialog('reopen')}>
+                  Reopen as draft
+                </Button>
               ) : null}
               {can('sows.approve') && !['TERMINATED', 'CLOSED'].includes(data.status) ? (
                 <Button
@@ -217,13 +232,24 @@ export default function SowDetailPage() {
           open={dialog === 'reject'}
           onOpenChange={(open) => setDialog(open ? 'reject' : null)}
           decision="REJECTED"
-          title="Return to draft"
-          description="The SOW goes back to draft so you can revise it. It stays with the project and no contracts are affected."
-          confirmLabel="Return to draft"
-          notesLabel="What needs to change"
+          title="Reject this statement of work"
+          description="The SOW is kept with who rejected it, when, and why. Reopen it as a draft later to revise and resubmit."
+          confirmLabel="Reject SOW"
+          notesLabel="Reason for rejection"
           busy={act.isPending}
           error={act.isError ? act.error : null}
           onConfirm={reject}
+        />
+
+        <ConfirmOnlyDialog
+          open={dialog === 'reopen'}
+          onOpenChange={(open) => setDialog(open ? 'reopen' : null)}
+          title="Reopen as draft"
+          description="The rejected SOW returns to draft so it can be revised and resubmitted. Its rejection stays in history."
+          confirmLabel="Reopen"
+          busy={act.isPending}
+          error={act.isError ? act.error : null}
+          onConfirm={reopen}
         />
 
         <ReasonDialog

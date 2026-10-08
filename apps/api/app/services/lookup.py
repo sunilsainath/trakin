@@ -157,6 +157,12 @@ async def resolve_personal(
             "AND p.company_id IS NULL AND p.owner_user_id = :uid"
         )
         params = {"pid": public_id, "uid": user_id}
+    elif table == "sows":
+        sql = (
+            f"SELECT {columns} FROM public.sows "  # noqa: S608 - table is allowlisted
+            "WHERE public_id = :pid AND company_id IS NULL AND created_by = :uid"
+        )
+        params = {"pid": public_id, "uid": user_id}
     else:
         raise ResourceNotFoundError("Unknown resource type.")
     if lock:

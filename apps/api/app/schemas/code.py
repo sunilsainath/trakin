@@ -370,6 +370,9 @@ class SowResponse(BaseModel):
     auto_generate_contracts: bool = True
     approved_by: PublicId | None = None
     approved_at: dt.datetime | None = None
+    rejected_by: str | None = None
+    rejected_at: dt.datetime | None = None
+    reject_reason: str | None = None
     document_id: PublicId | None = None
     roles: list[SowRoleResponse] = Field(default_factory=list)
     contract_count: int = 0
@@ -381,6 +384,7 @@ class SowResponse(BaseModel):
 
 class SowActionRequest(_Strict):
     reason: str | None = Field(default=None, max_length=2000)
+    notes: str | None = Field(default=None, max_length=4000)
 
 
 class SowVersionResponse(BaseModel):

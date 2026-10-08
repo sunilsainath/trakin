@@ -485,22 +485,45 @@ async def submit_sow(
 async def approve_sow(
     ctx_and_conn: SowsApprove, sow_id: str, payload: SowActionRequest | None = None
 ) -> dict[str, Any]:
+    """Approve a pending SOW. Captures approver and time; the SOW goes ACTIVE."""
     ctx, conn = ctx_and_conn
-    return await code_service.transition_sow(
+    return await code_service.accept_sow(
         conn,
         company_id=company_scope(ctx),
+        user_id=ctx.user_id,
         public_id=sow_id,
-        target="ACTIVE",
         actor_user_id=ctx.user_id,
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
-        reason=payload.reason if payload else None,
     )
 
 
-@router.post("/sows/{sow_id}/reject", response_model=SowResponse, summary="Return a SOW to draft")
+@router.post(
+    "/sows/{sow_id}/reject", response_model=SowResponse, summary="Reject a SOW with a reason"
+)
 async def reject_sow(
     ctx_and_conn: SowsApprove, sow_id: str, payload: SowActionRequest
+) -> dict[str, Any]:
+    """Reject a pending SOW. The row is kept with rejected-by/at/reason."""
+    ctx, conn = ctx_and_conn
+    return await code_service.reject_sow(
+        conn,
+        company_id=company_scope(ctx),
+        user_id=ctx.user_id,
+        public_id=sow_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        reason=str(payload.reason or ""),
+        notes=payload.notes,
+    )
+
+
+@router.post(
+    "/sows/{sow_id}/reopen", response_model=SowResponse, summary="Return a rejected SOW to draft"
+)
+async def reopen_sow(
+    ctx_and_conn: SowsApprove, sow_id: str, payload: SowActionRequest | None = None
 ) -> dict[str, Any]:
     ctx, conn = ctx_and_conn
     return await code_service.transition_sow(
@@ -511,7 +534,7 @@ async def reject_sow(
         actor_user_id=ctx.user_id,
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
-        reason=payload.reason,
+        reason=payload.reason if payload else None,
     )
 
 
@@ -970,4 +993,102 @@ async def list_personal_project_roles(
     ctx, conn = ctx_and_conn
     return await code_service.list_personal_project_roles(
         conn, user_id=ctx.user_id, project_public_id=project_id, limit=limit
+    )
+
+
+# =============================================================================
+# personal SOWs + SOW acceptance with capture
+# =============================================================================
+@router.post(
+    "/personal-sows",
+    response_model=SowResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a personal SOW",
+)
+async def create_personal_sow(
+    ctx_and_conn: PersonalContext, project_id: str, payload: CreateSowRequest
+) -> dict[str, Any]:
+    """A SOW under the caller's own personal project. No company involved."""
+    ctx, conn = ctx_and_conn
+    return await code_service.create_personal_sow(
+        conn,
+        user_id=ctx.user_id,
+        project_public_id=project_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        payload=payload.model_dump(),
+    )
+
+
+@router.get(
+    "/personal-sows",
+    response_model=Page[SowResponse],
+    summary="List my personal SOWs",
+)
+async def list_personal_sows(
+    ctx_and_conn: PersonalContext,
+    project_id: str | None = Query(None, max_length=32),
+    status_filter: str | None = Query(None, alias="status", max_length=32),
+    limit: int = Query(50, ge=1, le=200),
+) -> Page[Any]:
+    ctx, conn = ctx_and_conn
+    page_size = clamp_limit(limit, default=50, maximum=200)
+    rows = await code_service.list_personal_sows(
+        conn,
+        user_id=ctx.user_id,
+        project_public_id=project_id,
+        status=status_filter,
+        limit=page_size,
+    )
+    return build_page(rows, limit=page_size, cursor_keys=("updated_at",), request_id=ctx.request_id)
+
+
+@router.get(
+    "/personal-sows/{sow_id}",
+    response_model=SowResponse,
+    summary="Read one personal SOW",
+)
+async def read_personal_sow(ctx_and_conn: PersonalContext, sow_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await code_service.get_personal_sow(conn, user_id=ctx.user_id, public_id=sow_id)
+
+
+@router.post(
+    "/personal-sows/{sow_id}/accept",
+    response_model=SowResponse,
+    summary="Accept a personal SOW",
+)
+async def accept_personal_sow(ctx_and_conn: PersonalContext, sow_id: str) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await code_service.accept_sow(
+        conn,
+        company_id=None,
+        user_id=ctx.user_id,
+        public_id=sow_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+    )
+
+
+@router.post(
+    "/personal-sows/{sow_id}/reject",
+    response_model=SowResponse,
+    summary="Reject a personal SOW with a reason",
+)
+async def reject_personal_sow(
+    ctx_and_conn: PersonalContext, sow_id: str, payload: SowActionRequest
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await code_service.reject_sow(
+        conn,
+        company_id=None,
+        user_id=ctx.user_id,
+        public_id=sow_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        reason=str(payload.reason or ""),
+        notes=payload.notes,
     )
