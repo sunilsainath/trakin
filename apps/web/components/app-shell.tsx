@@ -56,11 +56,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [menuOpen, setMenuOpen] = React.useState(false)
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
 
-  // The home feed renders its own three-column layout (module rail, posts,
-  // suggestions), so the global sidebar steps aside on that route. The header
-  // stays: company context, search and notifications live there.
-  const hideSidebar = pathname === '/feed'
-
   // Close the mobile drawer whenever the route changes.
   React.useEffect(() => {
     setMobileOpen(false)
@@ -104,7 +99,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             'transition-transform duration-200 lg:static lg:translate-x-0',
             'print:hidden',
             mobileOpen ? 'translate-x-0 shadow-popover' : '-translate-x-full',
-            hideSidebar && 'hidden',
           )}
         >
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
@@ -147,9 +141,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </div>
             ))}
           </nav>
+
+          {/* Logout closes the Platform Modules list, as in the design. */}
+          <div className="shrink-0 border-t border-border p-3">
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-sm text-danger transition-colors hover:bg-danger-soft"
+            >
+              <LogOut aria-hidden className="size-4" />
+              Logout
+            </button>
+          </div>
         </aside>
 
-        {mobileOpen && !hideSidebar ? (
+        {mobileOpen ? (
           <div
             className="fixed inset-0 z-30 bg-foreground/40 lg:hidden"
             onClick={() => setMobileOpen(false)}
@@ -162,17 +168,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* ------------------------------------------------------------ */}
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-surface/90 px-3 backdrop-blur sm:px-5 print:hidden">
-            {hideSidebar ? null : (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="lg:hidden"
-                aria-label="Open navigation"
-                onClick={() => setMobileOpen(true)}
-              >
-                <Menu />
-              </Button>
-            )}
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="lg:hidden"
+              aria-label="Open navigation"
+              onClick={() => setMobileOpen(true)}
+            >
+              <Menu />
+            </Button>
 
             {/* Company switcher */}
             <div className="relative">

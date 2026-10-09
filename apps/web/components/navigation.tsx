@@ -44,7 +44,7 @@ export interface NavSection {
 
 export const NAV_SECTIONS: NavSection[] = [
   {
-    label: 'Menu',
+    label: 'Platform Modules',
     items: [
       { href: '/feed', label: 'Feed (Home)', icon: <Home aria-hidden /> },
       {
