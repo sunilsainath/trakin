@@ -49,6 +49,27 @@ export function ErrorState({
   title?: string
   className?: string
 }) {
+  // A company-scoped screen opened without a company is not a failure to
+  // retry: surface the same friendly join/create state PermissionState uses.
+  if (
+    error instanceof ApiError &&
+    (error.code === 'COMPANY_CONTEXT_REQUIRED' || error.code === 'NOT_A_COMPANY_MEMBER')
+  ) {
+    return (
+      <EmptyState
+        className={className}
+        icon={<Lock aria-hidden />}
+        title="This screen needs a company"
+        description="You are signed in without a company. Create one — or accept an invitation — and this screen unlocks. The feed, messages and your profile work without one."
+        action={
+          <Button asChild>
+            <a href="/companies">Go to Business</a>
+          </Button>
+        }
+      />
+    )
+  }
+
   const reference = errorReference(error)
 
   return (
@@ -82,6 +103,26 @@ export function PermissionState({
   error: unknown
   className?: string
 }) {
+  // A company-scoped screen opened with no company is not a refusal: the user
+  // simply has not joined or created one. Point them at the Business module
+  // instead of a dead "you do not have access" wall.
+  const needsCompany =
+    error instanceof ApiError && (error.code === 'COMPANY_CONTEXT_REQUIRED' || error.code === 'NOT_A_COMPANY_MEMBER')
+  if (needsCompany) {
+    return (
+      <EmptyState
+        className={className}
+        icon={<Lock aria-hidden />}
+        title="This screen needs a company"
+        description="You are signed in without a company. Create one — or accept an invitation — and this screen unlocks. The feed, messages and your profile work without one."
+        action={
+          <Button asChild>
+            <a href="/companies">Go to Business</a>
+          </Button>
+        }
+      />
+    )
+  }
   return (
     <EmptyState
       className={className}
@@ -92,9 +133,14 @@ export function PermissionState({
   )
 }
 
-/** True when the API refused for permission reasons rather than failing. */
+/** True when the API refused for permission or missing-company reasons. */
 export function isPermissionError(error: unknown): boolean {
-  return error instanceof ApiError && (error.code === 'PERMISSION_DENIED' || error.code === 'NOT_A_COMPANY_MEMBER')
+  return (
+    error instanceof ApiError &&
+    (error.code === 'PERMISSION_DENIED' ||
+      error.code === 'NOT_A_COMPANY_MEMBER' ||
+      error.code === 'COMPANY_CONTEXT_REQUIRED')
+  )
 }
 
 /* -------------------------------------------------------------------------- */

@@ -1867,3 +1867,201 @@ def _business_days(start: date, end: date) -> Decimal:
             total += 1
         cursor += timedelta(days=1)
     return Decimal(total)
+
+
+# =============================================================================
+# timesheet import (file -> entries -> review -> confirm)
+# =============================================================================
+# The whole point of an import is that a human reviews what was read out of the
+# file before it becomes a timesheet. Extraction therefore returns a preview and
+# writes nothing; confirmation writes the reviewed rows. CSV/TSV/text is parsed
+# deterministically, with no model in the loop, so it works with no AI
+# credentials. Other formats (PDF, images, Word) need document extraction/OCR,
+# which is a configured integration: without it the import answers honestly with
+# a typed "not configured" rather than guessing.
+
+_IMPORT_TEXT_MIME = {
+    "text/csv",
+    "text/plain",
+    "text/tab-separated-values",
+    "application/csv",
+}
+_IMPORT_TEXT_EXT = (".csv", ".tsv", ".txt")
+
+_DATE_HEADERS = {"date", "entry_date", "day", "work_date", "date_worked", "datum"}
+_HOURS_HEADERS = {"hours", "hrs", "total_hours", "billable_hours", "time", "duration"}
+_DESC_HEADERS = {"description", "work_description", "task", "notes", "detail", "comment"}
+_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d")
+
+
+def _normalise_header(value: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower()).strip("_")
+
+
+def _parse_import_date(value: str) -> date | None:
+    from datetime import datetime
+
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        pass
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()  # noqa: DTZ007 - date-only cell
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_delimited_timesheet(text: str) -> list[dict[str, Any]]:
+    """Map a delimited file's rows to entries. Never invents a value."""
+    import csv
+    import io
+
+    try:
+        dialect = csv.Sniffer().sniff(text[:2048], delimiters=",\t;|")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        delimiter = ","
+    rows = [
+        r for r in csv.reader(io.StringIO(text), delimiter=delimiter) if any(c.strip() for c in r)
+    ]
+    if len(rows) < 2:
+        return []
+    header = [_normalise_header(c) for c in rows[0]]
+
+    def find(candidates: set[str]) -> int | None:
+        for index, name in enumerate(header):
+            if name in candidates:
+                return index
+        return None
+
+    date_i = find(_DATE_HEADERS)
+    hours_i = find(_HOURS_HEADERS)
+    desc_i = find(_DESC_HEADERS)
+    if date_i is None or hours_i is None:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in rows[1:]:
+        if date_i >= len(row) or hours_i >= len(row):
+            continue
+        parsed = _parse_import_date(row[date_i])
+        raw_hours = (row[hours_i] or "").strip().rstrip("hH").strip()
+        if parsed is None or not raw_hours:
+            continue
+        try:
+            hours = Decimal(raw_hours)
+        except Exception:  # noqa: BLE001, S112
+            # A malformed cell is a skipped row, not a failed import; the user
+            # reviews the preview before anything is written, so a dropped row
+            # is visible rather than silent.
+            continue
+        if hours <= 0:
+            continue
+        description = row[desc_i].strip() if desc_i is not None and desc_i < len(row) else ""
+        out.append(
+            {
+                "entry_date": parsed.isoformat(),
+                "hours": str(hours),
+                "work_description": description,
+                "confidence": 1.0,
+            }
+        )
+    return out
+
+
+async def extract_timesheet_entries(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    filename: str | None,
+    content_type: str | None,
+    content: bytes,
+) -> dict[str, Any]:
+    """Read rows out of an uploaded file without writing anything."""
+    from app.core.config import get_settings
+    from app.core.errors import IntegrationNotConfiguredError
+
+    declared = (content_type or "").split(";")[0].strip().lower()
+    name = (filename or "").lower()
+    if declared in _IMPORT_TEXT_MIME or name.endswith(_IMPORT_TEXT_EXT):
+        entries = _parse_delimited_timesheet(content.decode("utf-8", "replace"))
+        if not entries:
+            raise ValidationError(
+                "No dated rows with hours were found in that file.",
+                details={"reason": "NO_ENTRIES_FOUND", "expected_columns": ["date", "hours"]},
+            )
+        return {"entries": entries, "source": "DETERMINISTIC", "degraded": False}
+
+    if not get_settings().ai_gateway_enabled:
+        raise IntegrationNotConfiguredError("document extraction")
+    raise BusinessRuleViolationError(
+        "Automatic import currently reads CSV, TSV and plain text. Upload one of "
+        "those, or add the rows by hand; other formats need document extraction "
+        "enabled for this environment.",
+        details={"reason": "UNSUPPORTED_IMPORT_FORMAT", "content_type": declared},
+    )
+
+
+async def import_timesheet_entries(
+    conn: AsyncConnection,
+    *,
+    company_id: uuid.UUID,
+    public_id: str,
+    actor_user_id: uuid.UUID,
+    request_id: str,
+    ip_address: str | None,
+    entries: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Write reviewed rows onto the sheet as AI_IMPORT entries."""
+    sheet = await _timesheet_row(conn, company_id=company_id, public_id=public_id, lock=True)
+    _assert_editable(sheet, actor_user_id)
+    if not entries:
+        raise ValidationError("Nothing selected to import.", details={"reason": "NO_ENTRIES"})
+
+    batch = uuid.uuid4().hex
+    for item in entries:
+        raw_date = item["entry_date"]
+        entry_date = raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
+        await add_entry(
+            conn,
+            company_id=company_id,
+            public_id=public_id,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
+            ip_address=ip_address,
+            payload={
+                "entry_date": entry_date,
+                "hours": item["hours"],
+                "work_description": item.get("work_description") or "",
+                "is_billable": item.get("is_billable", True),
+                "source": "AI_IMPORT",
+            },
+        )
+    await conn.execute(
+        text(
+            "UPDATE public.timesheets SET ai_imported = true, ai_import_batch = :b WHERE id = :rid"
+        ),
+        {"b": batch, "rid": sheet["id"]},
+    )
+    await audit.record(
+        conn,
+        action="timesheet.imported",
+        resource_type="timesheet",
+        resource_id=sheet["id"],
+        resource_public_id=public_id,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        new_values={"entry_count": len(entries), "batch": batch},
+        request_id=request_id,
+        ip_address=ip_address,
+    )
+    return await get_timesheet(
+        conn, company_id=company_id, public_id=public_id, actor_user_id=actor_user_id
+    )

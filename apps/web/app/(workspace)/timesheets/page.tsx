@@ -29,6 +29,7 @@ import { PageHeader, PageShell } from '@/components/page'
 import { ErrorState, LoadingBlock, useCompanyQuery } from '@/components/query'
 import { ConfirmOnlyDialog, ReasonDialog } from '@/components/destructive'
 import { notifyError, notifySuccess } from '@/components/toast'
+import { ImportEntries } from './import-entries'
 
 /**
  * Every timesheet in the company, for an approver.
@@ -633,7 +634,13 @@ function TimesheetDialog({
               }}
               className="space-y-3 rounded-lg border border-border bg-surface-sunken p-4"
             >
-              <p className="text-sm font-semibold">Record time</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold">Record time</p>
+                <ImportEntries
+                  timesheetId={timesheetId ?? ''}
+                  onImported={() => void sheet.refetch()}
+                />
+              </div>
               <div className="grid gap-3 sm:grid-cols-4">
                 <Field label="Date" required error={entryError ?? undefined}>
                   <Input

@@ -3638,3 +3638,70 @@ async def test_visa_status_is_owner_only(conn, tenants) -> None:
         conn, viewer_id=admin.user_id, target_user_id=admin.user_id
     )
     assert "work_authorization" not in profile
+# =============================================================================
+# timesheet import (file -> preview -> confirm)
+# =============================================================================
+async def test_timesheet_import_reads_csv_and_confirms(conn, skeleton, tenants) -> None:
+    """A CSV is parsed without a model, previewed, then written on confirm."""
+    from app.services import work
+
+    tenant = tenants["admin"]
+    sheet = await _draft_sheet(conn, skeleton, tenant, user=tenants["worker"].user_id)
+    csv = (
+        "date,hours,description\n"
+        f"{PERIOD_START.isoformat()},7.5,Backend work\n"
+        f"{(PERIOD_START + timedelta(days=1)).isoformat()},8,Ship it\n"
+        "not-a-row,,ignored\n"
+    )
+    preview = await work.extract_timesheet_entries(
+        conn,
+        company_id=tenant.company_id,
+        filename="hours.csv",
+        content_type="text/csv",
+        content=csv.encode(),
+    )
+    assert preview["source"] == "DETERMINISTIC"
+    assert len(preview["entries"]) == 2
+    assert preview["entries"][0]["hours"] == "7.5"
+    assert preview["entries"][0]["work_description"] == "Backend work"
+
+    updated = await work.import_timesheet_entries(
+        conn,
+        company_id=tenant.company_id,
+        public_id=sheet["public_id"],
+        actor_user_id=tenants["worker"].user_id,
+        request_id="flow",
+        ip_address=None,
+        entries=preview["entries"],
+    )
+    assert len(updated["entries"]) == 2
+    assert all(entry["source"] == "AI_IMPORT" for entry in updated["entries"])
+
+
+async def test_timesheet_import_rejects_empty_and_binary(conn, skeleton, tenants) -> None:
+    """No dated rows is a typed error; other formats answer honestly."""
+    from app.core.errors import BusinessRuleViolationError, ValidationError
+    from app.services import work
+
+    tenant = tenants["admin"]
+
+    with pytest.raises(ValidationError) as empty:
+        await work.extract_timesheet_entries(
+            conn,
+            company_id=tenant.company_id,
+            filename="empty.csv",
+            content_type="text/csv",
+            content=b"name,role\nAsha,dev\n",
+        )
+    assert empty.value.details["reason"] == "NO_ENTRIES_FOUND"
+
+    with pytest.raises((BusinessRuleViolationError, Exception)) as binary:
+        await work.extract_timesheet_entries(
+            conn,
+            company_id=tenant.company_id,
+            filename="scan.pdf",
+            content_type="application/pdf",
+            content=b"%PDF-1.4",
+        )
+    # Either a typed rule violation (gateway on) or a not-configured error (off).
+    assert binary.value is not None

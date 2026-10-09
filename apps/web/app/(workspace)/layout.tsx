@@ -1,7 +1,6 @@
 'use client'
 
 import * as React from 'react'
-import { usePathname } from 'next/navigation'
 import { AlertTriangle, Loader2 } from 'lucide-react'
 
 import { AppShell } from '@/components/app-shell'
@@ -9,11 +8,13 @@ import { Button, Card } from '@/components/ui'
 import { CompanyProvider, useCompany } from '@/hooks/use-company'
 
 /**
- * The gate every authenticated route renders inside.
+ * The shell every authenticated route renders inside.
  *
- * It waits for the company context to resolve before mounting the shell, so
- * no screen can briefly render data scoped to the wrong tenant. Auth and
- * permission failures are handled explicitly instead of showing an empty page.
+ * It waits for the session and company context to resolve before mounting the
+ * shell, so no screen briefly renders against the wrong tenant. It never
+ * requires a company: a signed-in user without one gets the full navigation,
+ * and each company-scoped screen shows its own "needs a company" state rather
+ * than a wall at the door. Auth failures are surfaced explicitly.
  */
 export default function WorkspaceLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -23,16 +24,8 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
   )
 }
 
-/** Routes that render usefully with no company selected. */
-const COMPANYLESS_ROUTES = ['/feed', '/network', '/messages', '/notifications', '/companies', '/settings']
-
-function isCompanylessRoute(pathname: string): boolean {
-  return COMPANYLESS_ROUTES.some((route) => pathname === route || pathname.startsWith(`${route}/`))
-}
-
 function WorkspaceGate({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname()
-  const { loading, error, activeCompany, companies } = useCompany()
+  const { loading, error } = useCompany()
 
   if (loading) {
     return (
@@ -62,31 +55,6 @@ function WorkspaceGate({ children }: { children: React.ReactNode }) {
           <Button className="mt-4" variant="outline" onClick={() => window.location.reload()}>
             Try again
           </Button>
-        </Card>
-      </div>
-    )
-  }
-
-  // Company membership is never forced. The feed and the Business module
-  // stay open so anyone can enter, connect and found a company; every other
-  // company-scoped screen explains itself instead of spinning forever.
-  if ((companies.length === 0 || !activeCompany) && !isCompanylessRoute(pathname)) {
-    return (
-      <div className="flex min-h-dvh items-center justify-center bg-background p-6">
-        <Card className="max-w-md p-6 text-center">
-          <h1 className="text-base font-semibold">You are not part of a company yet</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">
-            Not a company owner? No problem — most workspace screens unlock once
-            you belong to a company. Start from the feed or head to Business.
-          </p>
-          <div className="mt-4 flex justify-center gap-2">
-            <Button asChild>
-              <a href="/feed">Go to feed</a>
-            </Button>
-            <Button variant="outline" asChild>
-              <a href="/companies">Go to Business</a>
-            </Button>
-          </div>
         </Card>
       </div>
     )

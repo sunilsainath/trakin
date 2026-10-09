@@ -6,10 +6,11 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.api.deps import RequestContext, company_scope, require_permission
+from app.core.errors import ValidationError
 from app.core.logging import get_logger
 from app.schemas.common import Page, build_page, clamp_limit, decode_cursor
 from app.schemas.work import (
@@ -26,6 +27,7 @@ from app.schemas.work import (
     SubmitTimesheetRequest,
     TimesheetDecisionRequest,
     TimesheetEntryRequest,
+    TimesheetImportConfirmRequest,
     TimesheetResponse,
     TimesheetRevisionRequest,
     UpdateAssignmentRequest,
@@ -275,6 +277,64 @@ async def add_timesheet_entry(
         request_id=ctx.request_id,
         ip_address=ctx.ip_address,
         payload=payload.model_dump(),
+    )
+
+
+@router.post(
+    "/timesheets/{timesheet_id}/import",
+    summary="Read entries out of an uploaded timesheet file",
+)
+async def import_timesheet_preview(
+    ctx_and_conn: TimesheetsOwn,
+    timesheet_id: str,
+    file: Annotated[
+        UploadFile, File(description="CSV/TSV/text, or a scan when extraction is enabled")
+    ],
+) -> dict[str, Any]:
+    """Returns a preview of the rows found; writes nothing.
+
+    The user reviews these and calls the confirm route, so an import is never a
+    silent bulk edit. CSV/TSV/text is parsed deterministically; other formats
+    answer with a typed "not configured" until extraction is wired.
+    """
+    from app.core.config import get_settings
+
+    ctx, conn = ctx_and_conn
+    content = await file.read()
+    if len(content) > get_settings().max_upload_bytes:
+        raise ValidationError(
+            "That file is larger than the upload limit.",
+            details={"reason": "FILE_TOO_LARGE"},
+        )
+    return await work_service.extract_timesheet_entries(
+        conn,
+        company_id=company_scope(ctx),
+        filename=file.filename,
+        content_type=file.content_type,
+        content=content,
+    )
+
+
+@router.post(
+    "/timesheets/{timesheet_id}/import/confirm",
+    response_model=TimesheetResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Confirm imported entries",
+)
+async def import_timesheet_confirm(
+    ctx_and_conn: TimesheetsOwn,
+    timesheet_id: str,
+    payload: TimesheetImportConfirmRequest,
+) -> dict[str, Any]:
+    ctx, conn = ctx_and_conn
+    return await work_service.import_timesheet_entries(
+        conn,
+        company_id=company_scope(ctx),
+        public_id=timesheet_id,
+        actor_user_id=ctx.user_id,
+        request_id=ctx.request_id,
+        ip_address=ctx.ip_address,
+        entries=[entry.model_dump() for entry in payload.entries],
     )
 
 

@@ -187,6 +187,16 @@ class TimesheetRevisionRequest(_Strict):
     notes: str | None = Field(default=None, max_length=2000)
 
 
+class TimesheetImportConfirmRequest(_Strict):
+    """The reviewed rows a user accepts from an imported file.
+
+    Only what the user confirmed is written, so the import is a suggestion the
+    human approves rather than a silent bulk edit.
+    """
+
+    entries: list[TimesheetEntryRequest] = Field(..., min_length=1, max_length=1000)
+
+
 # ================================================================================ leave
 class CreateLeavePolicyRequest(_Strict):
     name: str = Field(..., min_length=2, max_length=160)

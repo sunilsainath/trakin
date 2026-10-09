@@ -130,10 +130,8 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
   const [unreadCounts, setUnreadCounts] = useState<UnreadCountsResponse | null>(null)
 
   const loadUnread = useCallback(async () => {
-    if (!activeCompanyPublicId) {
-      setUnreadCounts(null)
-      return
-    }
+    // Notifications are user-scoped, so the badge loads with or without a
+    // company; approvals are company work and come back zero when there is none.
     try {
       const counts = await api.get<UnreadCountsResponse>('/notifications/unread-count', {
         companyPublicId: activeCompanyPublicId,
